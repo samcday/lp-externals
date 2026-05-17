@@ -220,6 +220,12 @@ cargo run -- factory-reset --confirm-imei 123456789012345
 
 This is FlashApp's modem factory-reset primitive, not a signed FFU stock restore.
 
+Observed success response on Lumia 520 / `RM-914` is `NOKG` followed by a zero status word:
+
+```text
+4e 4f 4b 47 00 00 00 00
+```
+
 ## Current Quirks
 
 - If `NOKD` is not sent shortly after the USB interface appears, the BootMgr watchdog can bite. The USB device may still appear present, but nothing responds on the bulk endpoints.

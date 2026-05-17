@@ -2,9 +2,10 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::uefi::{
     LumiaApp, ascii_param_value, identify_app, make_phone_info_read_request,
-    parse_phone_info_response, require_app, send_raw_command, send_raw_command_expect_echo,
-    switch_to_flash_app, switch_to_phone_info_app, with_device,
+    parse_phone_info_response, require_app, send_raw_command, switch_to_flash_app,
+    switch_to_phone_info_app, with_device,
 };
+use crate::util::{ascii_dump, hex_dump};
 
 pub(crate) fn run(vid: u16, pid: u16, wait: bool, confirm_imei: &str) -> Result<()> {
     ensure!(!confirm_imei.is_empty(), "--confirm-imei must not be empty");
@@ -25,7 +26,8 @@ pub(crate) fn run(vid: u16, pid: u16, wait: bool, confirm_imei: &str) -> Result<
     with_device(vid, pid, false, |handle, endpoints| {
         let app = identify_app(handle, endpoints)?;
         require_app(app, LumiaApp::FlashApp, "factory-reset")?;
-        send_raw_command_expect_echo(handle, endpoints.out_addr, endpoints.in_addr, b"NOKG")
+        let response = send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKG")?;
+        validate_factory_reset_response(&response)
     })?;
 
     println!("sent FlashApp factory-reset command (NOKG)");
@@ -45,6 +47,44 @@ fn read_phone_info_imei(vid: u16, pid: u16) -> Result<String> {
     let imei = ascii_param_value(value).context("PhoneInfoApp IMEI is not printable ASCII")?;
     ensure!(!imei.is_empty(), "PhoneInfoApp returned an empty IMEI");
     Ok(imei)
+}
+
+fn validate_factory_reset_response(response: &[u8]) -> Result<()> {
+    ensure!(
+        response.len() >= 4,
+        "factory-reset response too short: {} bytes",
+        response.len()
+    );
+
+    if &response[..4] == b"NOKU" {
+        bail!("device reported NOKG as unsupported");
+    }
+
+    ensure!(
+        &response[..4] == b"NOKG",
+        "unexpected factory-reset response signature: {}",
+        ascii_dump(&response[..response.len().min(4)])
+    );
+
+    if response.len() == 4 {
+        return Ok(());
+    }
+
+    ensure!(
+        response.len() == 8,
+        "unexpected NOKG response length: {} bytes ({})",
+        response.len(),
+        hex_dump(response)
+    );
+
+    let status = u32::from_be_bytes(response[4..8].try_into().unwrap());
+    ensure!(
+        status == 0,
+        "factory-reset failed with status 0x{status:08x} ({})",
+        hex_dump(response)
+    );
+
+    Ok(())
 }
 
 fn mask_imei(imei: &str) -> String {
