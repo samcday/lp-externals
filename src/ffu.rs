@@ -1,4 +1,8 @@
-use std::{fs, path::Path};
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
 
 use anyhow::{Context, Result, ensure};
 
@@ -7,8 +11,8 @@ use crate::{
     util::{ascii_lossy, le_u32},
 };
 
-pub(crate) struct ParsedFfu {
-    pub(crate) bytes: Vec<u8>,
+#[derive(Clone, Debug)]
+pub(crate) struct FfuMetadata {
     pub(crate) file_size: u64,
     pub(crate) chunk_size: usize,
     pub(crate) platform_id: String,
@@ -21,107 +25,69 @@ pub(crate) struct ParsedFfu {
     pub(crate) chunk_indexes: Vec<Option<usize>>,
 }
 
-impl ParsedFfu {
+impl FfuMetadata {
     pub(crate) fn open(path: &Path) -> Result<Self> {
-        let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-        let file_size = u64::try_from(bytes.len()).context("FFU too large")?;
+        let mut file =
+            File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let file_size = file
+            .metadata()
+            .with_context(|| format!("failed to stat {}", path.display()))?
+            .len();
 
-        ensure!(bytes.len() >= 0x20, "FFU too short");
+        ensure!(file_size >= 0x20, "FFU too short");
+        let security_prefix = read_exact_at(&mut file, 0, 0x20)?;
         ensure!(
-            bytes.get(0x04..0x10) == Some(b"SignedImage "),
+            security_prefix.get(0x04..0x10) == Some(b"SignedImage "),
             "missing SignedImage header"
         );
 
-        let chunk_size = le_u32(&bytes, 0x10)? as usize * 1024;
+        let chunk_size = le_u32(&security_prefix, 0x10)? as usize * 1024;
         ensure!(chunk_size != 0, "invalid zero chunk size");
-        let security_header_size = le_u32(&bytes, 0x00)? as usize;
-        let catalog_size = le_u32(&bytes, 0x18)? as usize;
-        let hash_table_size = le_u32(&bytes, 0x1c)? as usize;
+        let security_header_size = le_u32(&security_prefix, 0x00)? as usize;
+        let catalog_size = le_u32(&security_prefix, 0x18)? as usize;
+        let hash_table_size = le_u32(&security_prefix, 0x1c)? as usize;
         let security_header_len = round_up_to_chunk(
             security_header_size + catalog_size + hash_table_size,
             chunk_size,
         );
 
         ensure!(
-            bytes.len() >= security_header_len + 0x1c,
+            file_size >= (security_header_len + 0x1c) as u64,
             "FFU too short for image header"
         );
+        let image_prefix = read_exact_at(&mut file, security_header_len as u64, 0x1c)?;
         ensure!(
-            bytes.get(security_header_len + 0x04..security_header_len + 0x10)
-                == Some(b"ImageFlash  "),
+            image_prefix.get(0x04..0x10) == Some(b"ImageFlash  "),
             "missing ImageFlash header"
         );
-        let image_header_size = le_u32(&bytes, security_header_len)? as usize;
-        let manifest_size = le_u32(&bytes, security_header_len + 0x10)? as usize;
+        let image_header_size = le_u32(&image_prefix, 0)? as usize;
+        let manifest_size = le_u32(&image_prefix, 0x10)? as usize;
         let image_header_len = round_up_to_chunk(image_header_size + manifest_size, chunk_size);
 
         let store_offset = security_header_len + image_header_len;
         ensure!(
-            bytes.len() >= store_offset + 248,
+            file_size >= (store_offset + 248) as u64,
             "FFU too short for store header"
         );
-        let platform_id = ascii_lossy(&bytes[store_offset + 0x0c..store_offset + 0x0c + 192])
-            .trim_matches(['\0', ' '])
-            .to_string();
-        let write_descriptor_count = le_u32(&bytes, store_offset + 208)? as usize;
-        let write_descriptor_len = le_u32(&bytes, store_offset + 212)? as usize;
-        let validate_descriptor_len = le_u32(&bytes, store_offset + 220)? as usize;
+        let store_prefix = read_exact_at(&mut file, store_offset as u64, 248)?;
+        let write_descriptor_count = le_u32(&store_prefix, 208)? as usize;
+        let write_descriptor_len = le_u32(&store_prefix, 212)? as usize;
+        let validate_descriptor_len = le_u32(&store_prefix, 220)? as usize;
         let store_header_len = round_up_to_chunk(
             248 + write_descriptor_len + validate_descriptor_len,
             chunk_size,
         );
         ensure!(
-            bytes.len() >= store_offset + store_header_len,
+            file_size >= (store_offset + store_header_len) as u64,
             "FFU too short for full store header"
         );
 
-        let store = &bytes[store_offset..store_offset + store_header_len];
-        let mut highest_chunk_index = 0usize;
-        let mut entry_offset = 248 + validate_descriptor_len;
-        let mut total_chunk_count = 0usize;
-
-        for _ in 0..write_descriptor_count {
-            let location_count = le_u32(store, entry_offset)? as usize;
-            let chunk_count = le_u32(store, entry_offset + 4)? as usize;
-
-            for index in 0..location_count {
-                let location_offset = entry_offset + 8 + index * 8;
-                let disk_access_method = le_u32(store, location_offset)?;
-                let chunk_index = le_u32(store, location_offset + 4)? as usize;
-
-                if disk_access_method == 0 && chunk_count > 0 {
-                    highest_chunk_index = highest_chunk_index.max(chunk_index + chunk_count - 1);
-                }
-            }
-
-            entry_offset += 8 + location_count * 8;
-            total_chunk_count += chunk_count;
-        }
-
-        let mut chunk_indexes = vec![None; highest_chunk_index + 1];
-        entry_offset = 248 + validate_descriptor_len;
-        let mut ffu_chunk_index = 0usize;
-
-        for _ in 0..write_descriptor_count {
-            let location_count = le_u32(store, entry_offset)? as usize;
-            let chunk_count = le_u32(store, entry_offset + 4)? as usize;
-
-            for index in 0..location_count {
-                let location_offset = entry_offset + 8 + index * 8;
-                let disk_access_method = le_u32(store, location_offset)?;
-                let chunk_index = le_u32(store, location_offset + 4)? as usize;
-
-                if disk_access_method == 0 {
-                    for chunk_offset in 0..chunk_count {
-                        chunk_indexes[chunk_index + chunk_offset] =
-                            Some(ffu_chunk_index + chunk_offset);
-                    }
-                }
-            }
-
-            entry_offset += 8 + location_count * 8;
-            ffu_chunk_index += chunk_count;
-        }
+        let store = read_exact_at(&mut file, store_offset as u64, store_header_len)?;
+        let platform_id = ascii_lossy(&store[0x0c..0x0c + 192])
+            .trim_matches(['\0', ' '])
+            .to_string();
+        let (total_chunk_count, chunk_indexes) =
+            parse_write_descriptors(&store, write_descriptor_count, validate_descriptor_len)?;
 
         let header_size = security_header_len + image_header_len + store_header_len;
         let payload_size = (total_chunk_count as u64) * (chunk_size as u64);
@@ -132,7 +98,6 @@ impl ParsedFfu {
         );
 
         Ok(Self {
-            bytes,
             file_size,
             chunk_size,
             platform_id,
@@ -146,7 +111,39 @@ impl ParsedFfu {
         })
     }
 
-    pub(crate) fn get_sectors(&self, start_sector: usize, sector_count: usize) -> Result<Vec<u8>> {
+    pub(crate) fn read_header(&self, path: &Path) -> Result<Vec<u8>> {
+        let mut file =
+            File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        read_exact_at(&mut file, 0, self.header_size)
+    }
+
+    pub(crate) fn get_partition(&self, path: &Path, name: &str) -> Result<Vec<u8>> {
+        let gpt_bytes = self.get_sectors(path, 1, 0x21)?;
+        let gpt = ParsedGpt::parse(&gpt_bytes)?;
+        let partition = gpt
+            .partition(name)
+            .with_context(|| format!("FFU does not contain partition {name}"))?;
+        let sector_count = partition
+            .last_lba
+            .checked_sub(partition.first_lba)
+            .and_then(|sectors| sectors.checked_add(1))
+            .context("partition sector range underflow")?;
+        let start_sector = usize::try_from(partition.first_lba)
+            .context("partition start sector does not fit in usize")?;
+        let sector_count =
+            usize::try_from(sector_count).context("partition size does not fit in usize")?;
+
+        self.get_sectors(path, start_sector, sector_count)
+    }
+
+    pub(crate) fn get_sectors(
+        &self,
+        path: &Path,
+        start_sector: usize,
+        sector_count: usize,
+    ) -> Result<Vec<u8>> {
+        let mut file =
+            File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
         let start = start_sector * 0x200;
         let size = sector_count * 0x200;
         let mut result = vec![0; size];
@@ -172,36 +169,80 @@ impl ParsedFfu {
             }
 
             let source_start = source_offset + (copy_start - target_chunk_start);
-            let source_end = source_start + (copy_end - copy_start);
             let target_start = copy_start - start;
-            let target_end = target_start + (copy_end - copy_start);
-
-            result[target_start..target_end].copy_from_slice(&self.bytes[source_start..source_end]);
+            let copy_len = copy_end - copy_start;
+            let bytes = read_exact_at(&mut file, source_start as u64, copy_len)?;
+            result[target_start..target_start + copy_len].copy_from_slice(&bytes);
         }
 
         Ok(result)
-    }
-
-    pub(crate) fn get_partition(&self, name: &str) -> Result<Vec<u8>> {
-        let gpt_bytes = self.get_sectors(1, 0x21)?;
-        let gpt = ParsedGpt::parse(&gpt_bytes)?;
-        let partition = gpt
-            .partition(name)
-            .with_context(|| format!("FFU does not contain partition {name}"))?;
-        let sector_count = partition
-            .last_lba
-            .checked_sub(partition.first_lba)
-            .and_then(|sectors| sectors.checked_add(1))
-            .context("partition sector range underflow")?;
-        let start_sector = usize::try_from(partition.first_lba)
-            .context("partition start sector does not fit in usize")?;
-        let sector_count =
-            usize::try_from(sector_count).context("partition size does not fit in usize")?;
-
-        self.get_sectors(start_sector, sector_count)
     }
 }
 
 fn round_up_to_chunk(size: usize, chunk_size: usize) -> usize {
     size.div_ceil(chunk_size) * chunk_size
+}
+
+fn read_exact_at(file: &mut File, offset: u64, len: usize) -> Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(offset))
+        .with_context(|| format!("failed to seek FFU to offset {offset}"))?;
+    let mut bytes = vec![0; len];
+    file.read_exact(&mut bytes)
+        .with_context(|| format!("failed to read {len} bytes from FFU offset {offset}"))?;
+    Ok(bytes)
+}
+
+fn parse_write_descriptors(
+    store: &[u8],
+    write_descriptor_count: usize,
+    validate_descriptor_len: usize,
+) -> Result<(usize, Vec<Option<usize>>)> {
+    let mut highest_chunk_index = 0usize;
+    let mut entry_offset = 248 + validate_descriptor_len;
+    let mut total_chunk_count = 0usize;
+
+    for _ in 0..write_descriptor_count {
+        let location_count = le_u32(store, entry_offset)? as usize;
+        let chunk_count = le_u32(store, entry_offset + 4)? as usize;
+
+        for index in 0..location_count {
+            let location_offset = entry_offset + 8 + index * 8;
+            let disk_access_method = le_u32(store, location_offset)?;
+            let chunk_index = le_u32(store, location_offset + 4)? as usize;
+
+            if disk_access_method == 0 && chunk_count > 0 {
+                highest_chunk_index = highest_chunk_index.max(chunk_index + chunk_count - 1);
+            }
+        }
+
+        entry_offset += 8 + location_count * 8;
+        total_chunk_count += chunk_count;
+    }
+
+    let mut chunk_indexes = vec![None; highest_chunk_index + 1];
+    entry_offset = 248 + validate_descriptor_len;
+    let mut ffu_chunk_index = 0usize;
+
+    for _ in 0..write_descriptor_count {
+        let location_count = le_u32(store, entry_offset)? as usize;
+        let chunk_count = le_u32(store, entry_offset + 4)? as usize;
+
+        for index in 0..location_count {
+            let location_offset = entry_offset + 8 + index * 8;
+            let disk_access_method = le_u32(store, location_offset)?;
+            let chunk_index = le_u32(store, location_offset + 4)? as usize;
+
+            if disk_access_method == 0 {
+                for chunk_offset in 0..chunk_count {
+                    chunk_indexes[chunk_index + chunk_offset] =
+                        Some(ffu_chunk_index + chunk_offset);
+                }
+            }
+        }
+
+        entry_offset += 8 + location_count * 8;
+        ffu_chunk_index += chunk_count;
+    }
+
+    Ok((total_chunk_count, chunk_indexes))
 }

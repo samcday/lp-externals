@@ -10,4 +10,5 @@ pub(crate) mod raw;
 pub(crate) mod reset;
 pub(crate) mod shutdown;
 pub(crate) mod stay_awake;
+pub(crate) mod stock_restore;
 pub(crate) mod switch;

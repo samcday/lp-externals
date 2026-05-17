@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use gosh_dl::{DownloadEngine, DownloadEvent, DownloadOptions, EngineConfig};
@@ -271,6 +274,84 @@ pub(crate) fn make_lumiadb_plan<'a>(
         ),
         sbl3_url: format!("{}/SBL3/{}", LUMIADB_API_BASE, LUMIA_520_SBL3),
     })
+}
+
+pub(crate) fn make_exact_lumiadb_plan<'a>(
+    database: &'a [LumiaDbDevice],
+    model: &str,
+    product_code: &str,
+) -> Result<LumiaDbPlan<'a>> {
+    let matches = database
+        .iter()
+        .filter(|device| device.hardware_model.eq_ignore_ascii_case(model))
+        .flat_map(|device| {
+            device
+                .firmwares
+                .iter()
+                .filter(move |firmware| firmware.product_code.eq_ignore_ascii_case(product_code))
+                .map(move |firmware| (device, firmware))
+        })
+        .collect::<Vec<_>>();
+
+    ensure!(
+        !matches.is_empty(),
+        "no LumiaDB stock FFU found for {model} product code {product_code}"
+    );
+
+    if matches.len() > 1 {
+        let candidates = matches
+            .iter()
+            .map(|(device, firmware)| {
+                format!(
+                    "{} {} product={} file={}",
+                    device.hardware_model,
+                    device.variant,
+                    firmware.product_code,
+                    firmware.ffu_filename
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        bail!(
+            "LumiaDB stock FFU is ambiguous for {model} product code {product_code}: {candidates}"
+        );
+    }
+
+    let (device, firmware) = matches[0];
+    Ok(LumiaDbPlan {
+        device,
+        firmware,
+        ffu_url: format!(
+            "{}/{}/{}",
+            LUMIADB_API_BASE, device.hardware_model, firmware.ffu_filename
+        ),
+        emergency_url: format!(
+            "{}/{}/{}.zip",
+            LUMIADB_API_BASE, device.hardware_model, device.hardware_model
+        ),
+        sbl3_url: format!("{}/SBL3/{}", LUMIADB_API_BASE, LUMIA_520_SBL3),
+    })
+}
+
+pub(crate) fn cache_dir_for(model: &str, product_code: &str) -> Result<PathBuf> {
+    Ok(cache_root()?.join("lumiadb").join(model).join(product_code))
+}
+
+pub(crate) fn cached_ffu_path(plan: &LumiaDbPlan<'_>) -> Result<PathBuf> {
+    Ok(
+        cache_dir_for(&plan.device.hardware_model, &plan.firmware.product_code)?
+            .join(&plan.firmware.ffu_filename),
+    )
+}
+
+fn cache_root() -> Result<PathBuf> {
+    if let Some(path) = env::var_os("XDG_CACHE_HOME").filter(|value| !value.as_os_str().is_empty())
+    {
+        return Ok(PathBuf::from(path).join("lp-externals"));
+    }
+
+    let home = env::var_os("HOME").context("HOME is not set and XDG_CACHE_HOME is empty")?;
+    Ok(PathBuf::from(home).join(".cache").join("lp-externals"))
 }
 
 pub(crate) fn print_lumiadb_plan(plan: &LumiaDbPlan<'_>) {

@@ -2,10 +2,10 @@ use std::{fs, path::Path};
 
 use anyhow::{Context, Result};
 
-use crate::{ffu::ParsedFfu, gpt::print_gpt};
+use crate::{ffu::FfuMetadata, gpt::print_gpt};
 
 pub(crate) fn info(path: &Path) -> Result<()> {
-    let ffu = ParsedFfu::open(path)?;
+    let ffu = FfuMetadata::open(path)?;
 
     println!("path: {}", path.display());
     println!("file size: {}", ffu.file_size);
@@ -23,14 +23,14 @@ pub(crate) fn info(path: &Path) -> Result<()> {
 }
 
 pub(crate) fn partitions(path: &Path) -> Result<()> {
-    let ffu = ParsedFfu::open(path)?;
-    let gpt = ffu.get_sectors(1, 0x21)?;
+    let ffu = FfuMetadata::open(path)?;
+    let gpt = ffu.get_sectors(path, 1, 0x21)?;
     print_gpt(&gpt)
 }
 
 pub(crate) fn extract(path: &Path, partition: &str, output: &Path) -> Result<()> {
-    let ffu = ParsedFfu::open(path)?;
-    let bytes = ffu.get_partition(partition)?;
+    let ffu = FfuMetadata::open(path)?;
+    let bytes = ffu.get_partition(path, partition)?;
 
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {

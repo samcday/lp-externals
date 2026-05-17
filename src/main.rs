@@ -1,5 +1,6 @@
 mod commands;
 mod ffu;
+mod flash;
 mod gpt;
 mod lumiadb;
 mod qcom;
@@ -108,6 +109,29 @@ enum Command {
         confirm_imei: String,
     },
 
+    /// Restore the exact LumiaDB stock FFU after confirming the phone IMEI.
+    StockRestore {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
+
+        /// Exact phone IMEI required before writing the destructive stock FFU restore.
+        #[arg(long)]
+        confirm_imei: Option<String>,
+
+        /// Resolve/download/validate only; do not write FFU data.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Do not reset the phone after a successful restore.
+        #[arg(long)]
+        no_reset: bool,
+    },
+
     /// Mode switching commands.
     Switch {
         #[command(subcommand)]
@@ -168,7 +192,7 @@ enum QcomCommand {
         /// Emergency zip, loader file, or directory.
         path: PathBuf,
 
-        /// Expected Root Key Hash as hex, for example from `param read RRKH`.
+        /// Expected Root Key Hash as hex, for example from `flash param read RRKH`.
         #[arg(long)]
         rrkh: Option<String>,
     },
@@ -347,6 +371,20 @@ fn main() -> Result<()> {
             pid,
             confirm_imei,
         } => commands::factory_reset::run(vid, pid, cli.wait, &confirm_imei),
+        Command::StockRestore {
+            vid,
+            pid,
+            confirm_imei,
+            dry_run,
+            no_reset,
+        } => commands::stock_restore::run(
+            vid,
+            pid,
+            cli.wait,
+            confirm_imei.as_deref(),
+            dry_run,
+            no_reset,
+        ),
         Command::Switch { command } => match command {
             SwitchCommand::Flash { vid, pid } => commands::switch::flash(vid, pid, cli.wait),
             SwitchCommand::PhoneInfo { vid, pid } => {
