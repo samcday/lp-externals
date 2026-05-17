@@ -47,6 +47,17 @@ enum Command {
         commands: Vec<String>,
     },
 
+    /// Disable the BootMgr reboot timeout with NOKD.
+    StayAwake {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
+    },
+
     /// Reboot the phone with the write-only NOKR command.
     Reset {
         /// USB vendor ID.
@@ -181,6 +192,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Identify { vid, pid } => identify(vid, pid, cli.wait),
         Command::Raw { vid, pid, commands } => raw(vid, pid, cli.wait, &commands),
+        Command::StayAwake { vid, pid } => stay_awake(vid, pid, cli.wait),
         Command::Reset { vid, pid } => reset(vid, pid, cli.wait),
         Command::Switch { command } => match command {
             SwitchCommand::Flash { vid, pid } => switch_flash(vid, pid, cli.wait),
@@ -233,6 +245,22 @@ fn raw(vid: u16, pid: u16, wait: bool, commands: &[String]) -> Result<()> {
 
         print_raw_response(response);
     }
+
+    Ok(())
+}
+
+fn stay_awake(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    let response = with_device(vid, pid, wait, |handle, endpoints| {
+        send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKD")
+    })?;
+
+    ensure!(
+        response == b"NOKD",
+        "unexpected NOKD response: {}",
+        hex_dump(&response)
+    );
+
+    println!("disabled reboot timeout (NOKD)");
 
     Ok(())
 }

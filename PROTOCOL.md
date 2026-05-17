@@ -22,14 +22,14 @@ By default, `lp-externals` waits for the target USB device to appear before open
 BootMgr has a short reboot/watchdog window. Send `NOKD` soon after enumeration to keep the app alive:
 
 ```sh
-cargo run -- raw NOKD
+cargo run -- stay-awake
 ```
 
 ## Known Commands
 
 | Command | Name in WPinternals | Notes |
 | --- | --- | --- |
-| `NOKD` | `DisableTimeoutsSignature` / `DisableRebootTimeOut()` | Disables the boot/reboot timeout watchdog. On this Lumia 520 BootMgr it replies with just `NOKD`. |
+| `NOKD` | `DisableTimeoutsSignature` / `DisableRebootTimeOut()` | Disables the boot/reboot timeout watchdog. Used by `stay-awake`. On this Lumia 520 BootMgr it replies with just `NOKD`. |
 | `NOKI` | `HelloSignature` | Hello/ping command. WPinternals expects a `NOKI` response. |
 | `NOKV` | `InfoQuerySignature` | Read-only info query. Used by `identify`. |
 | `NOKT` | `GetGPTSignature` | Read-only GPT query. Used by `gpt dump`. |
@@ -98,6 +98,10 @@ response ascii: NOKD
 ```
 
 That simple echo is currently treated as success.
+
+```sh
+cargo run -- stay-awake
+```
 
 ## `NOKR`
 
