@@ -53,10 +53,30 @@ enum Command {
         pid: u16,
     },
 
+    /// Mode switching commands.
+    Switch {
+        #[command(subcommand)]
+        command: SwitchCommand,
+    },
+
     /// GPT-related commands.
     Gpt {
         #[command(subcommand)]
         command: GptCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SwitchCommand {
+    /// Reboot/switch from BootMgr to FlashApp mode with NOKS.
+    Flash {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
     },
 }
 
@@ -100,6 +120,9 @@ fn main() -> Result<()> {
         Command::Identify { vid, pid } => identify(vid, pid),
         Command::Raw { vid, pid, commands } => raw(vid, pid, &commands),
         Command::Reset { vid, pid } => reset(vid, pid),
+        Command::Switch { command } => match command {
+            SwitchCommand::Flash { vid, pid } => switch_flash(vid, pid),
+        },
         Command::Gpt { command } => match command {
             GptCommand::Dump { vid, pid, format } => gpt_dump(vid, pid, format),
         },
@@ -151,6 +174,16 @@ fn reset(vid: u16, pid: u16) -> Result<()> {
     })?;
 
     println!("sent reset command (NOKR)");
+
+    Ok(())
+}
+
+fn switch_flash(vid: u16, pid: u16) -> Result<()> {
+    with_device(vid, pid, |handle, endpoints| {
+        send_raw_void_command(handle, endpoints.out_addr, b"NOKS")
+    })?;
+
+    println!("sent switch-to-FlashApp command (NOKS)");
 
     Ok(())
 }

@@ -25,7 +25,7 @@ cargo run -- raw NOKV
 | `NOKI` | `HelloSignature` | Hello/ping command. WPinternals expects a `NOKI` response. |
 | `NOKV` | `InfoQuerySignature` | Read-only info query. Used by `identify`. |
 | `NOKT` | `GetGPTSignature` | Read-only GPT query. Used by `gpt dump`. |
-| `NOKS` | `RebootToFlashAppSignature` | Switch/reboot to FlashApp mode. Mode-changing. Not used by read-only commands. |
+| `NOKS` | `RebootToFlashAppSignature` | Switch/reboot to FlashApp mode. Mode-changing. Used by `switch flash`. |
 | `NOKP` | `RebootToPhoneInfoAppSignature` | Switch/reboot to PhoneInfoApp mode. Mode-changing. |
 | `NOKR` | `RebootSignature` | Reboot. WPinternals sends this as write-only and does not wait for a response. Used by `reset`. |
 | `NOKA` | `ContinueBootSignature` | Continue normal boot where supported. |
@@ -82,6 +82,16 @@ Unlike read commands such as `NOKV`, WPinternals writes `NOKR` and does not read
 
 ```sh
 cargo run -- reset
+```
+
+## `NOKS`
+
+WPinternals names `NOKS` as `RebootToFlashAppSignature` and uses it for `ResetPhoneToFlashMode()` from BootMgr.
+
+This is mode-changing. It writes `NOKS` and does not wait for a response.
+
+```sh
+cargo run -- switch flash
 ```
 
 ## Current Quirks
