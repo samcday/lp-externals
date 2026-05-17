@@ -1,11 +1,9 @@
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
-use anyhow::{Context, Result, anyhow, bail};
-use clap::{Parser, Subcommand};
+use anyhow::{Context, Result, anyhow, bail, ensure};
+use clap::{Parser, Subcommand, ValueEnum};
 use rusb::{Device, DeviceHandle, Direction, GlobalContext, TransferType, UsbContext};
 
-const NOKIA_VENDOR_ID: u16 = 0x0421;
-const NOKIA_BOOTMGR_PRODUCT_ID: u16 = 0x066e;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Parser)]
@@ -21,27 +19,66 @@ enum Command {
     /// Identify a Lumia UEFI/BOOTMGR interface with the non-mutating NOKV query.
     Identify {
         /// USB vendor ID.
-        #[arg(long, default_value_t = NOKIA_VENDOR_ID, value_parser = parse_u16)]
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
         vid: u16,
 
         /// USB product ID.
-        #[arg(long, default_value_t = NOKIA_BOOTMGR_PRODUCT_ID, value_parser = parse_u16)]
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
         pid: u16,
     },
 
     /// Send a raw ASCII command and print the response.
     Raw {
         /// USB vendor ID.
-        #[arg(long, default_value_t = NOKIA_VENDOR_ID, value_parser = parse_u16)]
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
         vid: u16,
 
         /// USB product ID.
-        #[arg(long, default_value_t = NOKIA_BOOTMGR_PRODUCT_ID, value_parser = parse_u16)]
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
         pid: u16,
 
         /// Raw ASCII command, for example NOKI or NOKV.
         command: String,
     },
+
+    /// GPT-related commands.
+    Gpt {
+        #[command(subcommand)]
+        command: GptCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GptCommand {
+    /// Dump GPT partition entries with the read-only NOKT query.
+    Dump {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
+
+        /// Output format.
+        #[arg(long, default_value_t = GptDumpFormat::Text)]
+        format: GptDumpFormat,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum GptDumpFormat {
+    Text,
+    RawHex,
+}
+
+impl fmt::Display for GptDumpFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text => write!(f, "text"),
+            Self::RawHex => write!(f, "raw-hex"),
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -50,6 +87,9 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Identify { vid, pid } => identify(vid, pid),
         Command::Raw { vid, pid, command } => raw(vid, pid, &command),
+        Command::Gpt { command } => match command {
+            GptCommand::Dump { vid, pid, format } => gpt_dump(vid, pid, format),
+        },
     }
 }
 
@@ -75,6 +115,43 @@ fn raw(vid: u16, pid: u16, command: &str) -> Result<()> {
     print_raw_response(&response);
 
     Ok(())
+}
+
+fn gpt_dump(vid: u16, pid: u16, format: GptDumpFormat) -> Result<()> {
+    let response = with_device(vid, pid, |handle, endpoints| {
+        send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKT")
+    })?;
+
+    ensure!(
+        response.len() >= 8,
+        "NOKT response too short: {} bytes",
+        response.len()
+    );
+
+    if &response[..4] == b"NOKU" {
+        bail!("device reported NOKT as unsupported");
+    }
+
+    ensure!(
+        &response[..4] == b"NOKT",
+        "unexpected NOKT response signature: {}",
+        ascii_dump(&response[..response.len().min(4)])
+    );
+
+    let error = u16::from_be_bytes([response[6], response[7]]);
+    ensure!(error == 0, "NOKT failed with error 0x{error:04x}");
+
+    let gpt = response
+        .get(8..)
+        .context("NOKT response does not contain a GPT payload")?;
+
+    match format {
+        GptDumpFormat::Text => print_gpt(gpt),
+        GptDumpFormat::RawHex => {
+            println!("{}", hex_dump(gpt));
+            Ok(())
+        }
+    }
 }
 
 fn with_device<T>(
@@ -283,6 +360,148 @@ fn print_bootmgr_subblocks(response: &[u8]) {
         println!();
         offset = next_offset;
     }
+}
+
+fn print_gpt(gpt: &[u8]) -> Result<()> {
+    ensure!(
+        gpt.len() >= 0x600,
+        "GPT payload too short: {} bytes",
+        gpt.len()
+    );
+
+    let header_offset = 0x200;
+    let header = gpt
+        .get(header_offset..)
+        .context("GPT payload missing primary header")?;
+
+    ensure!(header.len() >= 92, "GPT header too short");
+    ensure!(&header[..8] == b"EFI PART", "missing GPT header signature");
+
+    let revision = le_u32(header, 8)?;
+    let header_size = le_u32(header, 12)?;
+    let current_lba = le_u64(header, 24)?;
+    let backup_lba = le_u64(header, 32)?;
+    let first_usable_lba = le_u64(header, 40)?;
+    let last_usable_lba = le_u64(header, 48)?;
+    let disk_guid = format_guid(&header[56..72]);
+    let partition_entries_lba = le_u64(header, 72)?;
+    let partition_entry_count = le_u32(header, 80)?;
+    let partition_entry_size = le_u32(header, 84)?;
+
+    println!("GPT header");
+    println!("  revision: 0x{revision:08x}");
+    println!("  header size: {header_size}");
+    println!("  current lba: {current_lba}");
+    println!("  backup lba: {backup_lba}");
+    println!("  first usable lba: {first_usable_lba}");
+    println!("  last usable lba: {last_usable_lba}");
+    println!("  disk guid: {disk_guid}");
+    println!("  partition entries lba: {partition_entries_lba}");
+    println!("  partition entry count: {partition_entry_count}");
+    println!("  partition entry size: {partition_entry_size}");
+
+    let entries_offset = usize::try_from(partition_entries_lba)
+        .context("partition entries LBA does not fit in usize")?
+        .checked_mul(512)
+        .context("partition entries offset overflow")?;
+    let entry_size = usize::try_from(partition_entry_size)
+        .context("partition entry size does not fit in usize")?;
+    ensure!(
+        entry_size >= 128,
+        "unsupported GPT entry size: {entry_size}"
+    );
+
+    println!();
+    println!("Partitions");
+
+    let mut printed = 0usize;
+    for index in 0..partition_entry_count {
+        let offset = entries_offset
+            .checked_add(
+                usize::try_from(index)
+                    .context("partition index does not fit in usize")?
+                    .checked_mul(entry_size)
+                    .context("partition entry offset overflow")?,
+            )
+            .context("partition entry offset overflow")?;
+        let entry = match gpt.get(offset..offset + entry_size) {
+            Some(entry) => entry,
+            None => break,
+        };
+
+        if entry[..16].iter().all(|byte| *byte == 0) {
+            continue;
+        }
+
+        let type_guid = format_guid(&entry[0..16]);
+        let unique_guid = format_guid(&entry[16..32]);
+        let first_lba = le_u64(entry, 32)?;
+        let last_lba = le_u64(entry, 40)?;
+        let attrs = le_u64(entry, 48)?;
+        let name = decode_utf16_name(&entry[56..128]);
+        let sectors = last_lba.saturating_sub(first_lba).saturating_add(1);
+
+        println!(
+            "  {:>3}: {:<36} first={} last={} sectors={} attrs=0x{:016x}",
+            index + 1,
+            name,
+            first_lba,
+            last_lba,
+            sectors,
+            attrs
+        );
+        println!("       type:   {type_guid}");
+        println!("       unique: {unique_guid}");
+
+        printed += 1;
+    }
+
+    if printed == 0 {
+        println!("  no populated partition entries found");
+    }
+
+    Ok(())
+}
+
+fn le_u32(bytes: &[u8], offset: usize) -> Result<u32> {
+    let bytes = bytes
+        .get(offset..offset + 4)
+        .with_context(|| format!("missing u32 at offset {offset}"))?;
+    Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+fn le_u64(bytes: &[u8], offset: usize) -> Result<u64> {
+    let bytes = bytes
+        .get(offset..offset + 8)
+        .with_context(|| format!("missing u64 at offset {offset}"))?;
+    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+fn format_guid(bytes: &[u8]) -> String {
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+        u16::from_le_bytes(bytes[4..6].try_into().unwrap()),
+        u16::from_le_bytes(bytes[6..8].try_into().unwrap()),
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+fn decode_utf16_name(bytes: &[u8]) -> String {
+    let words = bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .take_while(|word| *word != 0)
+        .collect::<Vec<_>>();
+
+    String::from_utf16_lossy(&words)
 }
 
 fn parse_u16(value: &str) -> Result<u16, String> {
