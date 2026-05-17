@@ -65,10 +65,33 @@ enum Command {
         command: ParamCommand,
     },
 
+    /// PhoneInfoApp variable commands.
+    PhoneInfo {
+        #[command(subcommand)]
+        command: PhoneInfoCommand,
+    },
+
     /// GPT-related commands.
     Gpt {
         #[command(subcommand)]
         command: GptCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PhoneInfoCommand {
+    /// Read a PhoneInfoApp variable with NOKXPH.
+    Read {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
+
+        /// Variable name, for example TYPE, CTR, or IMEI.
+        name: String,
     },
 }
 
@@ -93,6 +116,17 @@ enum ParamCommand {
 enum SwitchCommand {
     /// Reboot/switch from BootMgr to FlashApp mode with NOKS.
     Flash {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
+    },
+
+    /// Reboot/switch to PhoneInfoApp mode with NOKP.
+    PhoneInfo {
         /// USB vendor ID.
         #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
         vid: u16,
@@ -145,9 +179,13 @@ fn main() -> Result<()> {
         Command::Reset { vid, pid } => reset(vid, pid),
         Command::Switch { command } => match command {
             SwitchCommand::Flash { vid, pid } => switch_flash(vid, pid),
+            SwitchCommand::PhoneInfo { vid, pid } => switch_phone_info(vid, pid),
         },
         Command::Param { command } => match command {
             ParamCommand::Read { vid, pid, name } => param_read(vid, pid, &name),
+        },
+        Command::PhoneInfo { command } => match command {
+            PhoneInfoCommand::Read { vid, pid, name } => phone_info_read(vid, pid, &name),
         },
         Command::Gpt { command } => match command {
             GptCommand::Dump { vid, pid, format } => gpt_dump(vid, pid, format),
@@ -214,6 +252,16 @@ fn switch_flash(vid: u16, pid: u16) -> Result<()> {
     Ok(())
 }
 
+fn switch_phone_info(vid: u16, pid: u16) -> Result<()> {
+    with_device(vid, pid, |handle, endpoints| {
+        send_raw_void_command(handle, endpoints.out_addr, b"NOKP")
+    })?;
+
+    println!("sent switch-to-PhoneInfoApp command (NOKP)");
+
+    Ok(())
+}
+
 fn param_read(vid: u16, pid: u16, name: &str) -> Result<()> {
     ensure!(
         name.len() <= 4,
@@ -237,6 +285,31 @@ fn param_read(vid: u16, pid: u16, name: &str) -> Result<()> {
     }
 
     print_known_param_decode(name, value);
+
+    Ok(())
+}
+
+fn phone_info_read(vid: u16, pid: u16, name: &str) -> Result<()> {
+    ensure!(
+        name.len() <= 4,
+        "variable name must be at most 4 ASCII bytes"
+    );
+    ensure!(name.is_ascii(), "variable name must be ASCII");
+
+    let request = make_phone_info_read_request(name);
+    let response = with_device(vid, pid, |handle, endpoints| {
+        send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, &request)
+    })?;
+
+    let value = parse_phone_info_response(&response)?;
+
+    println!("variable: {name}");
+    println!("length: {} bytes", value.len());
+    println!("hex: {}", hex_dump(value));
+
+    if let Some(text) = ascii_param_value(value) {
+        println!("ascii: {text}");
+    }
 
     Ok(())
 }
@@ -448,6 +521,43 @@ fn parse_param_response(response: &[u8]) -> Result<&[u8]> {
     Ok(&response[value_offset..value_end])
 }
 
+fn make_phone_info_read_request(name: &str) -> Vec<u8> {
+    let mut request = vec![0; 16];
+    request[..6].copy_from_slice(b"NOKXPH");
+    request[6..6 + name.len()].copy_from_slice(name.as_bytes());
+    request[6 + name.len()] = 0;
+    request
+}
+
+fn parse_phone_info_response(response: &[u8]) -> Result<&[u8]> {
+    ensure!(
+        response.len() >= 8,
+        "PhoneInfo response too short: {} bytes",
+        response.len()
+    );
+
+    if response.len() >= 4 && &response[..4] == b"NOKU" {
+        bail!("device reported NOKXPH as unsupported");
+    }
+
+    ensure!(
+        response.len() >= 6 && &response[..6] == b"NOKXPH",
+        "unexpected PhoneInfo response signature: {}",
+        ascii_dump(&response[..response.len().min(6)])
+    );
+
+    let value_len = u16::from_be_bytes([response[6], response[7]]) as usize;
+    let value_offset = 8;
+    let value_end = value_offset + value_len;
+    ensure!(
+        response.len() >= value_end,
+        "PhoneInfo response truncated: value length {value_len}, response length {}",
+        response.len()
+    );
+
+    Ok(&response[value_offset..value_end])
+}
+
 fn ascii_param_value(value: &[u8]) -> Option<String> {
     if value.is_empty() {
         return None;
@@ -521,6 +631,7 @@ fn print_identification(response: &[u8]) {
     match app {
         1 => print_bootmgr_subblocks(response),
         2 => print_flashapp_subblocks(response),
+        3 => print_phone_info_subblocks(response),
         _ => {}
     }
 }
@@ -675,6 +786,41 @@ fn print_flashapp_subblocks(response: &[u8]) {
 
 fn be_u32_payload(payload: &[u8]) -> u32 {
     u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+}
+
+fn print_phone_info_subblocks(response: &[u8]) {
+    if response.len() < 11 {
+        return;
+    }
+
+    let subblock_count = response[10];
+    let mut offset = 11usize;
+    println!("subblocks: {subblock_count}");
+
+    for index in 0..subblock_count {
+        if offset + 3 > response.len() {
+            println!("subblock {index}: truncated header at offset {offset}");
+            return;
+        }
+
+        let id = response[offset];
+        let len = u16::from_be_bytes([response[offset + 1], response[offset + 2]]) as usize;
+        let payload_offset = offset + 3;
+        let next_offset = payload_offset + len;
+
+        if next_offset > response.len() {
+            println!("subblock {index}: id=0x{id:02x} truncated payload length={len}");
+            return;
+        }
+
+        print!("subblock {index}: id=0x{id:02x} length={len}");
+        if id == 0x20 {
+            print!(" crc_header_info");
+        }
+        println!();
+
+        offset = next_offset;
+    }
 }
 
 fn print_gpt(gpt: &[u8]) -> Result<()> {

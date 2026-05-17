@@ -26,12 +26,13 @@ cargo run -- raw NOKV
 | `NOKV` | `InfoQuerySignature` | Read-only info query. Used by `identify`. |
 | `NOKT` | `GetGPTSignature` | Read-only GPT query. Used by `gpt dump`. |
 | `NOKS` | `RebootToFlashAppSignature` | Switch/reboot to FlashApp mode. Mode-changing. Used by `switch flash`. |
-| `NOKP` | `RebootToPhoneInfoAppSignature` | Switch/reboot to PhoneInfoApp mode. Mode-changing. |
+| `NOKP` | `RebootToPhoneInfoAppSignature` | Switch/reboot to PhoneInfoApp mode. Mode-changing. Used by `switch phone-info`. |
 | `NOKR` | `RebootSignature` | Reboot. WPinternals sends this as write-only and does not wait for a response. Used by `reset`. |
 | `NOKA` | `ContinueBootSignature` | Continue normal boot where supported. |
 | `NOKM` | `RebootToMassStorageSignature` | Switch/reboot to mass storage where supported. Mode-changing. |
 | `NOKZ` | `ShutdownSignature` | Shutdown. |
 | `NOKXFR` | `ReadParamSignature` | FlashApp parameter read. Used by `param read`. |
+| `NOKXPH` | `GetVariableSignature` | PhoneInfoApp variable read. Used by `phone-info read`. |
 
 ## `NOKV` Response
 
@@ -108,6 +109,53 @@ This is mode-changing. It writes `NOKS` and does not wait for a response.
 
 ```sh
 cargo run -- switch flash
+```
+
+## `NOKP`
+
+WPinternals names `NOKP` as `RebootToPhoneInfoAppSignature` and uses it to enter PhoneInfoApp mode from BootMgr or FlashApp.
+
+This is mode-changing. It writes `NOKP` and does not wait for a response.
+
+```sh
+cargo run -- switch phone-info
+```
+
+## PhoneInfoApp Variables
+
+WPinternals reads PhoneInfoApp variables with `NOKXPH`.
+
+Request layout seen so far:
+
+```text
+offset  size  value
+0x00    6     "NOKXPH"
+0x06    5     ASCII variable name plus NUL terminator, for example "TYPE\0"
+0x0b    5     zero padding
+```
+
+Response layout:
+
+```text
+offset  size  value
+0x00    6     "NOKXPH"
+0x06    2     big-endian value length
+0x08    n     ASCII value
+```
+
+Useful variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `TYPE` | product type, usually exact `RM-xxxx` |
+| `CTR` | public product code |
+| `IMEI` | device IMEI |
+
+Examples:
+
+```sh
+cargo run -- phone-info read TYPE
+cargo run -- phone-info read CTR
 ```
 
 ## FlashApp Parameters
