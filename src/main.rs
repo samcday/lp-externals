@@ -37,8 +37,9 @@ enum Command {
         #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
         pid: u16,
 
-        /// Raw ASCII command, for example NOKI or NOKV.
-        command: String,
+        /// Raw ASCII commands, for example NOKI or NOKV.
+        #[arg(required = true)]
+        commands: Vec<String>,
     },
 
     /// GPT-related commands.
@@ -86,7 +87,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Identify { vid, pid } => identify(vid, pid),
-        Command::Raw { vid, pid, command } => raw(vid, pid, &command),
+        Command::Raw { vid, pid, commands } => raw(vid, pid, &commands),
         Command::Gpt { command } => match command {
             GptCommand::Dump { vid, pid, format } => gpt_dump(vid, pid, format),
         },
@@ -102,17 +103,32 @@ fn identify(vid: u16, pid: u16) -> Result<()> {
     Ok(())
 }
 
-fn raw(vid: u16, pid: u16, command: &str) -> Result<()> {
-    let response = with_device(vid, pid, |handle, endpoints| {
-        send_raw_command(
-            handle,
-            endpoints.out_addr,
-            endpoints.in_addr,
-            command.as_bytes(),
-        )
+fn raw(vid: u16, pid: u16, commands: &[String]) -> Result<()> {
+    let responses = with_device(vid, pid, |handle, endpoints| {
+        let mut responses = Vec::with_capacity(commands.len());
+
+        for command in commands {
+            responses.push((
+                command.clone(),
+                send_raw_command(
+                    handle,
+                    endpoints.out_addr,
+                    endpoints.in_addr,
+                    command.as_bytes(),
+                )?,
+            ));
+        }
+
+        Ok(responses)
     })?;
 
-    print_raw_response(&response);
+    for (index, (command, response)) in responses.iter().enumerate() {
+        if responses.len() > 1 {
+            println!("command {}: {command}", index + 1);
+        }
+
+        print_raw_response(response);
+    }
 
     Ok(())
 }
