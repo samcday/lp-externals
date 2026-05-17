@@ -1,0 +1,18 @@
+# Lumia/Nokia interfaces used by LPexternals.
+# TAG+="uaccess" grants the active local user access on systemd/logind systems.
+
+# Nokia Care Suite / label / normal / boot manager / flash modes.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0421", ATTR{idProduct}=="05ee", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0421", ATTR{idProduct}=="062a", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0421", ATTR{idProduct}=="0658", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0421", ATTR{idProduct}=="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0421", ATTR{idProduct}=="0661", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0421", ATTR{idProduct}=="066e", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0421", ATTR{idProduct}=="06fc", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0421", ATTR{idProduct}=="0713", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0421", ATTR{idProduct}=="0714", TAG+="uaccess"
+
+# Later Microsoft-branded Lumia interfaces.
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="0a00", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="0a01", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="0a02", TAG+="uaccess"
