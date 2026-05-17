@@ -1,4 +1,4 @@
-use std::{fmt, time::Duration};
+use std::{fmt, fs, io::Write, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -122,6 +122,32 @@ enum LumiaDbCommand {
         #[arg(long)]
         product_code: Option<String>,
     },
+
+    /// Check availability of planned LumiaDB downloads with HEAD requests.
+    Check {
+        /// Hardware model, for example RM-914.
+        #[arg(long, default_value = "RM-914")]
+        model: String,
+
+        /// Product code, for example 059S083.
+        #[arg(long)]
+        product_code: Option<String>,
+    },
+
+    /// Download planned LumiaDB blobs.
+    Download {
+        /// Hardware model, for example RM-914.
+        #[arg(long, default_value = "RM-914")]
+        model: String,
+
+        /// Product code, for example 059S083.
+        #[arg(long)]
+        product_code: Option<String>,
+
+        /// Output directory.
+        #[arg(long, default_value = "blobs")]
+        output: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -243,6 +269,15 @@ fn main() -> Result<()> {
                 model,
                 product_code,
             } => lumiadb_plan(&model, product_code.as_deref()),
+            LumiaDbCommand::Check {
+                model,
+                product_code,
+            } => lumiadb_check(&model, product_code.as_deref()),
+            LumiaDbCommand::Download {
+                model,
+                product_code,
+                output,
+            } => lumiadb_download(&model, product_code.as_deref(), &output),
         },
     }
 }
@@ -284,6 +319,59 @@ fn lumiadb_plan(model: &str, product_code: Option<&str>) -> Result<()> {
     let plan = make_lumiadb_plan(&database, model, product_code)?;
 
     print_lumiadb_plan(&plan);
+
+    Ok(())
+}
+
+fn lumiadb_check(model: &str, product_code: Option<&str>) -> Result<()> {
+    let database = fetch_lumiadb_database()?;
+    let plan = make_lumiadb_plan(&database, model, product_code)?;
+    let client = http_client()?;
+
+    print_lumiadb_plan(&plan);
+    println!();
+    println!("availability:");
+
+    for blob in plan.blobs() {
+        let response = client
+            .head(&blob.url)
+            .send()
+            .with_context(|| format!("HEAD failed for {}", blob.url))?;
+        let status = response.status();
+        let size = response
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("unknown");
+        println!("  {}: {} size={}", blob.kind, status, size);
+    }
+
+    Ok(())
+}
+
+fn lumiadb_download(model: &str, product_code: Option<&str>, output: &PathBuf) -> Result<()> {
+    let database = fetch_lumiadb_database()?;
+    let plan = make_lumiadb_plan(&database, model, product_code)?;
+    let client = http_client()?;
+    let target_dir = output
+        .join(&plan.device.hardware_model)
+        .join(&plan.firmware.product_code);
+
+    fs::create_dir_all(&target_dir)
+        .with_context(|| format!("failed to create {}", target_dir.display()))?;
+
+    print_lumiadb_plan(&plan);
+    println!();
+    println!("download directory: {}", target_dir.display());
+
+    for blob in plan.blobs() {
+        let path = target_dir.join(blob.filename);
+        download_file(&client, &blob.url, &path)?;
+    }
+
+    let manifest = plan.manifest_json();
+    fs::write(target_dir.join("manifest.json"), manifest)
+        .with_context(|| format!("failed to write manifest in {}", target_dir.display()))?;
 
     Ok(())
 }
@@ -809,11 +897,51 @@ struct LumiaDbPlan<'a> {
     sbl3_url: String,
 }
 
+impl LumiaDbPlan<'_> {
+    fn blobs(&self) -> Vec<PlannedBlob> {
+        vec![
+            PlannedBlob {
+                kind: "ffu",
+                url: self.ffu_url.clone(),
+                filename: self.firmware.ffu_filename.clone(),
+            },
+            PlannedBlob {
+                kind: "emergency",
+                url: self.emergency_url.clone(),
+                filename: format!("{}.zip", self.device.hardware_model),
+            },
+            PlannedBlob {
+                kind: "sbl3",
+                url: self.sbl3_url.clone(),
+                filename: LUMIA_520_SBL3.to_string(),
+            },
+        ]
+    }
+
+    fn manifest_json(&self) -> String {
+        serde_json::json!({
+            "hardwareModel": self.device.hardware_model,
+            "phoneModel": self.device.phone_model,
+            "variant": self.device.variant,
+            "productCode": self.firmware.product_code,
+            "firmware": self.firmware.firmware,
+            "os": self.firmware.os,
+            "ffu": self.ffu_url,
+            "emergency": self.emergency_url,
+            "sbl3": self.sbl3_url,
+        })
+        .to_string()
+    }
+}
+
+struct PlannedBlob {
+    kind: &'static str,
+    url: String,
+    filename: String,
+}
+
 fn fetch_lumiadb_database() -> Result<Vec<LumiaDbDevice>> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("lp-externals/0.1")
-        .build()
-        .context("failed to build HTTP client")?;
+    let client = http_client()?;
     let response = client
         .get(LUMIADB_DATABASE_URL)
         .send()
@@ -824,6 +952,38 @@ fn fetch_lumiadb_database() -> Result<Vec<LumiaDbDevice>> {
     response
         .json::<Vec<LumiaDbDevice>>()
         .context("failed to parse LumiaDB database")
+}
+
+fn http_client() -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .user_agent("lp-externals/0.1")
+        .build()
+        .context("failed to build HTTP client")
+}
+
+fn download_file(client: &reqwest::blocking::Client, url: &str, path: &PathBuf) -> Result<()> {
+    if path.exists() {
+        println!("exists: {}", path.display());
+        return Ok(());
+    }
+
+    println!("downloading: {url}");
+    let mut response = client
+        .get(url)
+        .send()
+        .with_context(|| format!("download failed for {url}"))?
+        .error_for_status()
+        .with_context(|| format!("download request failed for {url}"))?;
+    let mut file =
+        fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    let bytes = response
+        .copy_to(&mut file)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    file.flush()
+        .with_context(|| format!("failed to flush {}", path.display()))?;
+    println!("wrote: {} ({} bytes)", path.display(), bytes);
+
+    Ok(())
 }
 
 fn make_lumiadb_plan<'a>(
