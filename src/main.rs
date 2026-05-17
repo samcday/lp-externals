@@ -59,10 +59,33 @@ enum Command {
         command: SwitchCommand,
     },
 
+    /// FlashApp parameter commands.
+    Param {
+        #[command(subcommand)]
+        command: ParamCommand,
+    },
+
     /// GPT-related commands.
     Gpt {
         #[command(subcommand)]
         command: GptCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ParamCommand {
+    /// Read a FlashApp parameter with NOKXFR.
+    Read {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
+
+        /// Parameter name, for example RRKH, FAI, SS, FCS, DPI, or FVER.
+        name: String,
     },
 }
 
@@ -122,6 +145,9 @@ fn main() -> Result<()> {
         Command::Reset { vid, pid } => reset(vid, pid),
         Command::Switch { command } => match command {
             SwitchCommand::Flash { vid, pid } => switch_flash(vid, pid),
+        },
+        Command::Param { command } => match command {
+            ParamCommand::Read { vid, pid, name } => param_read(vid, pid, &name),
         },
         Command::Gpt { command } => match command {
             GptCommand::Dump { vid, pid, format } => gpt_dump(vid, pid, format),
@@ -184,6 +210,33 @@ fn switch_flash(vid: u16, pid: u16) -> Result<()> {
     })?;
 
     println!("sent switch-to-FlashApp command (NOKS)");
+
+    Ok(())
+}
+
+fn param_read(vid: u16, pid: u16, name: &str) -> Result<()> {
+    ensure!(
+        name.len() <= 4,
+        "parameter name must be at most 4 ASCII bytes"
+    );
+    ensure!(name.is_ascii(), "parameter name must be ASCII");
+
+    let request = make_read_param_request(name);
+    let response = with_device(vid, pid, |handle, endpoints| {
+        send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, &request)
+    })?;
+
+    let value = parse_param_response(&response)?;
+
+    println!("param: {name}");
+    println!("length: {} bytes", value.len());
+    println!("hex: {}", hex_dump(value));
+
+    if let Some(text) = ascii_param_value(value) {
+        println!("ascii: {text}");
+    }
+
+    print_known_param_decode(name, value);
 
     Ok(())
 }
@@ -357,6 +410,84 @@ fn send_raw_void_command(
     }
 
     Ok(())
+}
+
+fn make_read_param_request(name: &str) -> Vec<u8> {
+    let mut request = vec![0; 0x0b];
+    request[..6].copy_from_slice(b"NOKXFR");
+    request[7..7 + name.len()].copy_from_slice(name.as_bytes());
+    request
+}
+
+fn parse_param_response(response: &[u8]) -> Result<&[u8]> {
+    ensure!(
+        response.len() >= 0x10,
+        "parameter response too short: {} bytes",
+        response.len()
+    );
+
+    if response.len() >= 4 && &response[..4] == b"NOKU" {
+        bail!("device reported NOKXFR as unsupported");
+    }
+
+    ensure!(
+        response.len() >= 6 && &response[..6] == b"NOKXFR",
+        "unexpected parameter response signature: {}",
+        ascii_dump(&response[..response.len().min(6)])
+    );
+
+    let value_len = response[0x10] as usize;
+    let value_offset = 0x11;
+    let value_end = value_offset + value_len;
+    ensure!(
+        response.len() >= value_end,
+        "parameter response truncated: value length {value_len}, response length {}",
+        response.len()
+    );
+
+    Ok(&response[value_offset..value_end])
+}
+
+fn ascii_param_value(value: &[u8]) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+
+    if value
+        .iter()
+        .all(|byte| byte.is_ascii_graphic() || *byte == b' ' || *byte == 0)
+    {
+        let text = ascii_lossy(value).trim_matches([' ', '\0']).to_string();
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+
+    None
+}
+
+fn print_known_param_decode(name: &str, value: &[u8]) {
+    match name {
+        "FAI" if value.len() >= 6 => {
+            println!("flash protocol: {}.{}", value[1], value[2]);
+            println!("flash app: {}.{}", value[3], value[4]);
+        }
+        "FCS" if value.len() == 4 => {
+            let flags = u32::from_be_bytes(value.try_into().unwrap());
+            println!("security flags: 0x{flags:08x}");
+        }
+        "SS" if value.len() >= 8 => {
+            println!("is test device: {}", value[0]);
+            println!("platform secure boot: {}", value[1] != 0);
+            println!("secure FFU efuse: {}", value[2] != 0);
+            println!("debug: {}", value[3] != 0);
+            println!("RDC: {}", value[4] != 0);
+            println!("authenticated: {}", value[5] != 0);
+            println!("UEFI secure boot: {}", value[6] != 0);
+            println!("crypto hardware key: {}", value[7] != 0);
+        }
+        _ => {}
+    }
 }
 
 fn print_identification(response: &[u8]) {

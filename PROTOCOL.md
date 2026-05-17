@@ -31,6 +31,7 @@ cargo run -- raw NOKV
 | `NOKA` | `ContinueBootSignature` | Continue normal boot where supported. |
 | `NOKM` | `RebootToMassStorageSignature` | Switch/reboot to mass storage where supported. Mode-changing. |
 | `NOKZ` | `ShutdownSignature` | Shutdown. |
+| `NOKXFR` | `ReadParamSignature` | FlashApp parameter read. Used by `param read`. |
 
 ## `NOKV` Response
 
@@ -107,6 +108,41 @@ This is mode-changing. It writes `NOKS` and does not wait for a response.
 
 ```sh
 cargo run -- switch flash
+```
+
+## FlashApp Parameters
+
+WPinternals reads FlashApp parameters with `NOKXFR`.
+
+Request layout seen so far:
+
+```text
+offset  size  value
+0x00    6     "NOKXFR"
+0x06    1     padding / zero
+0x07    4     ASCII parameter name, NUL padded if shorter
+```
+
+WPinternals extracts the returned value length from response byte `0x10`, then copies bytes from `0x11`.
+
+Useful parameters for the unlock path:
+
+| Param | Meaning |
+| --- | --- |
+| `RRKH` | Root Key Hash, used to match Qualcomm emergency loaders |
+| `FAI` | Flash app/protocol version |
+| `SS` | security status |
+| `FCS` | security flags |
+| `DPI` | platform ID |
+| `FVER` | firmware version |
+
+Examples:
+
+```sh
+cargo run -- param read RRKH
+cargo run -- param read FAI
+cargo run -- param read SS
+cargo run -- param read DPI
 ```
 
 ## Current Quirks
