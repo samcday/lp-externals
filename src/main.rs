@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const RESET_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 const LUMIADB_DATABASE_URL: &str = "https://lumiadb.com/database.json";
 const LUMIADB_API_BASE: &str = "https://api.lumiadb.com";
 const LUMIA_520_SBL3: &str = "Engineering-SBL3-Lumia-520-620-625-720-1320.bin";
@@ -494,13 +495,62 @@ fn stay_awake(vid: u16, pid: u16, wait: bool) -> Result<()> {
 }
 
 fn reset(vid: u16, pid: u16, wait: bool) -> Result<()> {
-    with_device(vid, pid, wait, |handle, endpoints| {
-        send_raw_void_command(handle, endpoints.out_addr, b"NOKR")
+    let app = with_device_allow_release_disconnect(vid, pid, wait, |handle, endpoints| {
+        let identification =
+            send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")?;
+        let app = parse_nokv_app_type(&identification)?;
+
+        if app == 3 {
+            send_raw_void_command(handle, endpoints.out_addr, b"NOKA")?;
+        } else {
+            ensure_reset_supported_app(app)?;
+            send_raw_void_command(handle, endpoints.out_addr, b"NOKR")?;
+        }
+
+        Ok(app)
     })?;
+
+    if app == 3 {
+        println!("PhoneInfoApp does not support NOKR; sent continue-boot command (NOKA)");
+        let next_app = send_reset_when_available(vid, pid)?;
+
+        println!(
+            "sent reset command (NOKR) after PhoneInfoApp continued to {}",
+            app_type_name(next_app)
+        );
+        return Ok(());
+    }
 
     println!("sent reset command (NOKR)");
 
     Ok(())
+}
+
+fn send_reset_when_available(vid: u16, pid: u16) -> Result<u8> {
+    let started = std::time::Instant::now();
+    let mut last_error = None;
+
+    while started.elapsed() < RESET_RETRY_TIMEOUT {
+        match with_device_allow_release_disconnect(vid, pid, false, |handle, endpoints| {
+            let identification =
+                send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")?;
+            let app = parse_nokv_app_type(&identification)?;
+            ensure_reset_supported_app(app)?;
+            send_raw_void_command(handle, endpoints.out_addr, b"NOKR")?;
+            Ok(app)
+        }) {
+            Ok(app) => return Ok(app),
+            Err(err) => {
+                last_error = Some(err);
+                std::thread::sleep(DEVICE_POLL_INTERVAL);
+            }
+        }
+    }
+
+    match last_error {
+        Some(err) => Err(err).context("timed out waiting for reset-capable app after NOKA"),
+        None => bail!("timed out waiting for reset-capable app after NOKA"),
+    }
 }
 
 fn switch_flash(vid: u16, pid: u16, wait: bool) -> Result<()> {
@@ -635,6 +685,25 @@ fn with_device<T>(
     wait: bool,
     f: impl FnOnce(&mut DeviceHandle<GlobalContext>, &Endpoints) -> Result<T>,
 ) -> Result<T> {
+    with_device_release_policy(vid, pid, wait, false, f)
+}
+
+fn with_device_allow_release_disconnect<T>(
+    vid: u16,
+    pid: u16,
+    wait: bool,
+    f: impl FnOnce(&mut DeviceHandle<GlobalContext>, &Endpoints) -> Result<T>,
+) -> Result<T> {
+    with_device_release_policy(vid, pid, wait, true, f)
+}
+
+fn with_device_release_policy<T>(
+    vid: u16,
+    pid: u16,
+    wait: bool,
+    allow_release_disconnect: bool,
+    f: impl FnOnce(&mut DeviceHandle<GlobalContext>, &Endpoints) -> Result<T>,
+) -> Result<T> {
     let (device, mut handle) = open_device(vid, pid, wait)?;
     let endpoints = find_bulk_endpoints(&device)?;
 
@@ -658,9 +727,14 @@ fn with_device<T>(
 
     let result = f(&mut handle, &endpoints);
 
-    handle
-        .release_interface(endpoints.interface)
-        .with_context(|| format!("failed to release interface {}", endpoints.interface))?;
+    match handle.release_interface(endpoints.interface) {
+        Ok(()) => {}
+        Err(rusb::Error::NoDevice) if allow_release_disconnect => {}
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to release interface {}", endpoints.interface));
+        }
+    }
 
     result
 }
@@ -879,6 +953,17 @@ fn ensure_active_app(
     ensure!(
         app == expected_app,
         "{command_name} requires {expected_name}, but NOKV reports app type {} ({}). Run `lp-externals switch phone-info`, wait for USB re-enumeration, then retry.",
+        app,
+        app_type_name(app)
+    );
+
+    Ok(())
+}
+
+fn ensure_reset_supported_app(app: u8) -> Result<()> {
+    ensure!(
+        matches!(app, 1 | 2),
+        "reset requires BootManager or FlashApp after PhoneInfoApp escape, but NOKV reports app type {} ({})",
         app,
         app_type_name(app)
     );
