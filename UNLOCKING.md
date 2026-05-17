@@ -147,6 +147,17 @@ So:
 | engineering SBL3 | alternate SBL3 with engineering features |
 | donor/supported FFU | source of patch-compatible EFIESP boot files |
 
+## Stock Restore First
+
+Before attempting the Spec A unlock path, `stock-restore` exercises the normal signed FFU flashing flow that FlashApp is designed to support:
+
+```sh
+cargo run -- stock-restore --dry-run
+cargo run -- stock-restore --confirm-imei <IMEI>
+```
+
+This command identifies the phone through PhoneInfoApp, resolves the exact LumiaDB FFU from `TYPE + CTR`, validates the FFU against FlashApp platform/eMMC/RRKH data, and then streams the signed FFU through `NOKXFS`. This is destructive, but it is not an exploit path and does not write locally patched boot components.
+
 ## Why Qualcomm Emergency Mode Is Needed
 
 Locked Lumia FlashApp enforces secure FFU rules. It will not normally raw-write locally patched `SBL2`, `SBL3`, `UEFI`, GPT, or arbitrary sectors.
@@ -418,11 +429,11 @@ It should:
 
 It should not flash, patch, or enter Qualcomm emergency mode.
 
-## Destructive Work Not Yet Implemented
+## Destructive Unlock Work Not Yet Implemented
 
-Do not implement or run these until all offline checks above exist:
+Signed stock FFU restore now exists as `stock-restore`. Do not implement or run these unlock-specific destructive paths until all offline checks above exist:
 
-- `NOKXFS` / secure flash writes beyond controlled read-only experiments
+- `NOKXFS` soft-brick or patched-payload writes outside the signed stock FFU restore path
 - FFU soft-brick trigger
 - Qualcomm emergency loader upload
 - Qualcomm emergency raw flashing

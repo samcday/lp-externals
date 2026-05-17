@@ -226,6 +226,24 @@ Observed success response on Lumia 520 / `RM-914` is `NOKG` followed by a zero s
 4e 4f 4b 47 00 00 00 00
 ```
 
+## Stock Restore
+
+The `stock-restore` porcelain performs the normal signed FFU flashing path:
+
+1. Switch to PhoneInfoApp and read `TYPE`, `CTR`, and `IMEI`.
+2. Resolve exactly one stock FFU from LumiaDB using `TYPE + CTR`.
+3. Cache the FFU under `$XDG_CACHE_HOME/lp-externals/lumiadb/<TYPE>/<CTR>/`, or `~/.cache/lp-externals/lumiadb/<TYPE>/<CTR>/` when `XDG_CACHE_HOME` is unset.
+4. Switch to FlashApp and validate platform, eMMC size, and phone RRKH against FFU `SBL1`.
+5. Require exact `--confirm-imei` before writing.
+6. Send the signed FFU header and payload through FlashApp `NOKXFS` secure FFU messages.
+
+```sh
+cargo run -- stock-restore --dry-run
+cargo run -- stock-restore --confirm-imei 123456789012345
+```
+
+The Lumia FlashApp path follows WPinternals' stock FFU behavior: send the complete signed FFU header with secure FFU header subblock `0x0b`, then stream payload data with sync v2 subblock `0x1b` when reported by FlashApp, or sync v1 subblock `0x0c` otherwise. This is distinct from the unlock/exploit path because FlashApp remains in its signed FFU validation flow.
+
 ## Current Quirks
 
 - If `NOKD` is not sent shortly after the USB interface appears, the BootMgr watchdog can bite. The USB device may still appear present, but nothing responds on the bulk endpoints.
