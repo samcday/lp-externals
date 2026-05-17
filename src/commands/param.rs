@@ -2,8 +2,8 @@ use anyhow::{Result, ensure};
 
 use crate::{
     uefi::{
-        ascii_param_value, make_read_param_request, parse_param_response, print_known_param_decode,
-        print_raw_response, send_raw_command, with_device,
+        LumiaApp, ascii_param_value, identify_app, make_read_param_request, parse_param_response,
+        print_known_param_decode, print_raw_response, require_app, send_raw_command, with_device,
     },
     util::hex_dump,
 };
@@ -17,6 +17,8 @@ pub(crate) fn read(vid: u16, pid: u16, wait: bool, debug: bool, name: &str) -> R
 
     let request = make_read_param_request(name);
     let response = with_device(vid, pid, wait, |handle, endpoints| {
+        let app = identify_app(handle, endpoints)?;
+        require_app(app, LumiaApp::FlashApp, "flash param read")?;
         send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, &request)
     })?;
 

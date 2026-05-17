@@ -15,12 +15,168 @@ pub(crate) struct Endpoints {
     pub(crate) out_addr: u8,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LumiaApp {
+    BootManager,
+    FlashApp,
+    PhoneInfoApp,
+    Unknown(u8),
+}
+
+impl LumiaApp {
+    pub(crate) fn from_app_type(app: u8) -> Self {
+        match app {
+            1 => Self::BootManager,
+            2 => Self::FlashApp,
+            3 => Self::PhoneInfoApp,
+            _ => Self::Unknown(app),
+        }
+    }
+
+    pub(crate) fn app_type(self) -> u8 {
+        match self {
+            Self::BootManager => 1,
+            Self::FlashApp => 2,
+            Self::PhoneInfoApp => 3,
+            Self::Unknown(app) => app,
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        app_type_name(self.app_type())
+    }
+}
+
 pub(crate) fn app_type_name(app: u8) -> &'static str {
     match app {
         1 => "BootManager",
         2 => "FlashApp",
         3 => "PhoneInfoApp",
         _ => "unknown",
+    }
+}
+
+pub(crate) fn identify_app(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &Endpoints,
+) -> Result<LumiaApp> {
+    let identification = send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")?;
+    Ok(LumiaApp::from_app_type(parse_nokv_app_type(
+        &identification,
+    )?))
+}
+
+pub(crate) fn require_app(app: LumiaApp, expected: LumiaApp, command_name: &str) -> Result<()> {
+    if app == expected {
+        return Ok(());
+    }
+
+    let switch_command = match expected {
+        LumiaApp::FlashApp => "lp-externals switch flash",
+        LumiaApp::PhoneInfoApp => "lp-externals switch phone-info",
+        LumiaApp::BootManager | LumiaApp::Unknown(_) => "lp-externals reset",
+    };
+
+    bail!(
+        "{command_name} requires {}, but NOKV reports app type {} ({}). Run `{switch_command}` and retry.",
+        expected.name(),
+        app.app_type(),
+        app.name()
+    )
+}
+
+pub(crate) fn switch_to_flash_app(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    let app = with_device_allow_release_disconnect(vid, pid, wait, |handle, endpoints| {
+        let app = identify_app(handle, endpoints)?;
+        match app {
+            LumiaApp::FlashApp => {}
+            LumiaApp::BootManager => send_raw_void_command(handle, endpoints.out_addr, b"NOKS")?,
+            LumiaApp::PhoneInfoApp => send_raw_void_command(handle, endpoints.out_addr, b"NOKA")?,
+            LumiaApp::Unknown(_) => bail!(
+                "switch flash requires BootManager, FlashApp, or PhoneInfoApp, but NOKV reports app type {} ({})",
+                app.app_type(),
+                app.name()
+            ),
+        }
+        Ok(app)
+    })?;
+
+    match app {
+        LumiaApp::FlashApp => Ok(()),
+        LumiaApp::BootManager => wait_for_app(vid, pid, LumiaApp::FlashApp),
+        LumiaApp::PhoneInfoApp => {
+            let app = wait_for_any_app(vid, pid, &[LumiaApp::BootManager, LumiaApp::FlashApp])?;
+            if app == LumiaApp::FlashApp {
+                Ok(())
+            } else {
+                switch_to_flash_app(vid, pid, false)
+            }
+        }
+        LumiaApp::Unknown(_) => unreachable!(),
+    }
+}
+
+pub(crate) fn switch_to_phone_info_app(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    let app = with_device_allow_release_disconnect(vid, pid, wait, |handle, endpoints| {
+        let app = identify_app(handle, endpoints)?;
+        match app {
+            LumiaApp::PhoneInfoApp => {}
+            LumiaApp::BootManager | LumiaApp::FlashApp => {
+                send_raw_void_command(handle, endpoints.out_addr, b"NOKP")?
+            }
+            LumiaApp::Unknown(_) => bail!(
+                "switch phone-info requires BootManager, FlashApp, or PhoneInfoApp, but NOKV reports app type {} ({})",
+                app.app_type(),
+                app.name()
+            ),
+        }
+        Ok(app)
+    })?;
+
+    if app == LumiaApp::PhoneInfoApp {
+        Ok(())
+    } else {
+        wait_for_app(vid, pid, LumiaApp::PhoneInfoApp)
+    }
+}
+
+pub(crate) fn wait_for_app(vid: u16, pid: u16, expected: LumiaApp) -> Result<()> {
+    wait_for_any_app(vid, pid, &[expected]).map(|_| ())
+}
+
+pub(crate) fn wait_for_any_app(vid: u16, pid: u16, expected: &[LumiaApp]) -> Result<LumiaApp> {
+    let started = std::time::Instant::now();
+    let mut last_error = None;
+
+    while started.elapsed() < RESET_RETRY_TIMEOUT {
+        match with_device(vid, pid, false, |handle, endpoints| {
+            let app = identify_app(handle, endpoints)?;
+            if expected.contains(&app) {
+                Ok(app)
+            } else {
+                bail!(
+                    "expected {}, but NOKV reports app type {} ({})",
+                    expected
+                        .iter()
+                        .map(|app| app.name())
+                        .collect::<Vec<_>>()
+                        .join(" or "),
+                    app.app_type(),
+                    app.name()
+                )
+            }
+        }) {
+            Ok(app) => return Ok(app),
+            Err(err) => {
+                last_error = Some(err);
+                std::thread::sleep(DEVICE_POLL_INTERVAL);
+            }
+        }
+    }
+
+    match last_error {
+        Some(err) => Err(err).context("timed out waiting for requested Lumia app"),
+        None => bail!("timed out waiting for requested Lumia app"),
     }
 }
 
@@ -339,25 +495,6 @@ pub(crate) fn parse_phone_info_response(response: &[u8]) -> Result<&[u8]> {
     );
 
     Ok(&response[value_offset..value_end])
-}
-
-pub(crate) fn ensure_active_app(
-    response: &[u8],
-    expected_app: u8,
-    expected_name: &str,
-    command_name: &str,
-) -> Result<()> {
-    let app = parse_nokv_app_type(response)
-        .with_context(|| format!("failed to identify active app before running {command_name}"))?;
-
-    ensure!(
-        app == expected_app,
-        "{command_name} requires {expected_name}, but NOKV reports app type {} ({}). Run `lp-externals switch phone-info`, wait for USB re-enumeration, then retry.",
-        app,
-        app_type_name(app)
-    );
-
-    Ok(())
 }
 
 pub(crate) fn ensure_reset_supported_app(app: u8) -> Result<()> {

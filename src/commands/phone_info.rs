@@ -2,8 +2,8 @@ use anyhow::{Result, ensure};
 
 use crate::{
     uefi::{
-        ascii_param_value, ensure_active_app, make_phone_info_read_request,
-        parse_phone_info_response, print_raw_response, send_raw_command, with_device,
+        LumiaApp, ascii_param_value, identify_app, make_phone_info_read_request,
+        parse_phone_info_response, print_raw_response, require_app, send_raw_command, with_device,
     },
     util::hex_dump,
 };
@@ -17,9 +17,8 @@ pub(crate) fn read(vid: u16, pid: u16, wait: bool, debug: bool, name: &str) -> R
 
     let request = make_phone_info_read_request(name);
     let response = with_device(vid, pid, wait, |handle, endpoints| {
-        let identification =
-            send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")?;
-        ensure_active_app(&identification, 3, "PhoneInfoApp", "phone-info read")?;
+        let app = identify_app(handle, endpoints)?;
+        require_app(app, LumiaApp::PhoneInfoApp, "phone-info read")?;
         send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, &request)
     })?;
 

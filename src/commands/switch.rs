@@ -1,19 +1,15 @@
 use anyhow::Result;
 
-use crate::uefi::{send_raw_void_command, with_device};
+use crate::uefi::{switch_to_flash_app, switch_to_phone_info_app};
 
 pub(crate) fn flash(vid: u16, pid: u16, wait: bool) -> Result<()> {
-    with_device(vid, pid, wait, |handle, endpoints| {
-        send_raw_void_command(handle, endpoints.out_addr, b"NOKS")
-    })?;
-    println!("sent switch-to-FlashApp command (NOKS)");
+    switch_to_flash_app(vid, pid, wait)?;
+    println!("phone is in FlashApp");
     Ok(())
 }
 
 pub(crate) fn phone_info(vid: u16, pid: u16, wait: bool) -> Result<()> {
-    with_device(vid, pid, wait, |handle, endpoints| {
-        send_raw_void_command(handle, endpoints.out_addr, b"NOKP")
-    })?;
-    println!("sent switch-to-PhoneInfoApp command (NOKP)");
+    switch_to_phone_info_app(vid, pid, wait)?;
+    println!("phone is in PhoneInfoApp");
     Ok(())
 }

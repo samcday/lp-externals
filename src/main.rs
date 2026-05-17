@@ -99,10 +99,10 @@ enum Command {
         command: SwitchCommand,
     },
 
-    /// FlashApp parameter commands.
-    Param {
+    /// FlashApp commands.
+    Flash {
         #[command(subcommand)]
-        command: ParamCommand,
+        command: FlashCommand,
     },
 
     /// PhoneInfoApp variable commands.
@@ -250,6 +250,15 @@ enum PhoneInfoCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum FlashCommand {
+    /// FlashApp parameter commands.
+    Param {
+        #[command(subcommand)]
+        command: ParamCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum ParamCommand {
     /// Read a FlashApp parameter with NOKXFR.
     Read {
@@ -324,10 +333,12 @@ fn main() -> Result<()> {
                 commands::switch::phone_info(vid, pid, cli.wait)
             }
         },
-        Command::Param { command } => match command {
-            ParamCommand::Read { vid, pid, name } => {
-                commands::param::read(vid, pid, cli.wait, cli.debug, &name)
-            }
+        Command::Flash { command } => match command {
+            FlashCommand::Param { command } => match command {
+                ParamCommand::Read { vid, pid, name } => {
+                    commands::param::read(vid, pid, cli.wait, cli.debug, &name)
+                }
+            },
         },
         Command::PhoneInfo { command } => match command {
             PhoneInfoCommand::Read { vid, pid, name } => {
