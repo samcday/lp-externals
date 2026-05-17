@@ -387,8 +387,10 @@ fn print_identification(response: &[u8]) {
         println!("app version: {}.{}", response[8], response[9]);
     }
 
-    if app == 1 {
-        print_bootmgr_subblocks(response);
+    match app {
+        1 => print_bootmgr_subblocks(response),
+        2 => print_flashapp_subblocks(response),
+        _ => {}
     }
 }
 
@@ -450,6 +452,98 @@ fn print_bootmgr_subblocks(response: &[u8]) {
         println!();
         offset = next_offset;
     }
+}
+
+fn print_flashapp_subblocks(response: &[u8]) {
+    if response.len() < 11 {
+        return;
+    }
+
+    let subblock_count = response[10];
+    let mut offset = 11usize;
+    println!("subblocks: {subblock_count}");
+
+    for index in 0..subblock_count {
+        if offset + 3 > response.len() {
+            println!("subblock {index}: truncated header at offset {offset}");
+            return;
+        }
+
+        let id = response[offset];
+        let len = u16::from_be_bytes([response[offset + 1], response[offset + 2]]) as usize;
+        let payload_offset = offset + 3;
+        let next_offset = payload_offset + len;
+
+        if next_offset > response.len() {
+            println!("subblock {index}: id=0x{id:02x} truncated payload length={len}");
+            return;
+        }
+
+        let payload = &response[payload_offset..next_offset];
+        print!("subblock {index}: id=0x{id:02x} length={len}");
+
+        match id {
+            0x01 if payload.len() >= 4 => {
+                let transfer_size = be_u32_payload(payload);
+                print!(" transfer_size={transfer_size}");
+            }
+            0x02 if payload.len() >= 4 => {
+                let write_buffer_size = be_u32_payload(payload);
+                print!(" write_buffer_size={write_buffer_size}");
+            }
+            0x03 if payload.len() >= 4 => {
+                let emmc_sectors = be_u32_payload(payload);
+                print!(" emmc_sectors={emmc_sectors}");
+            }
+            0x04 if payload.len() >= 4 => {
+                let sd_sectors = be_u32_payload(payload);
+                print!(" sd_sectors={sd_sectors}");
+            }
+            0x05 => {
+                print!(
+                    " platform_id={}",
+                    ascii_lossy(payload).trim_matches([' ', '\0'])
+                );
+            }
+            0x0d if payload.len() >= 2 => {
+                print!(" async_support={}", payload[1] == 1);
+            }
+            0x0f if payload.len() >= 8 => {
+                print!(
+                    " security version={} platform_secure_boot={} secure_ffu={} jtag_disabled={} rdc_present={} authenticated={} uefi_secure_boot={} secondary_hardware_key={}",
+                    payload[0],
+                    payload[1] == 1,
+                    payload[2] == 1,
+                    payload[3] == 1,
+                    payload[4] == 1,
+                    payload[5] == 1 || payload[5] == 2,
+                    payload[6] == 1,
+                    payload[7] == 1
+                );
+            }
+            0x10 if payload.len() >= 3 => {
+                let mask = u16::from_be_bytes([payload[1], payload[2]]);
+                print!(
+                    " secure_ffu_protocol version={} mask=0x{mask:04x}",
+                    payload[0]
+                );
+            }
+            0x1f if !payload.is_empty() => {
+                print!(" mmos_over_usb={}", payload[0] == 1);
+            }
+            0x20 => {
+                print!(" crc_header_info");
+            }
+            _ => {}
+        }
+
+        println!();
+        offset = next_offset;
+    }
+}
+
+fn be_u32_payload(payload: &[u8]) -> u32 {
+    u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
 }
 
 fn print_gpt(gpt: &[u8]) -> Result<()> {

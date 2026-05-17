@@ -60,6 +60,21 @@ WPinternals app type values:
 | `2` | FlashApp |
 | `3` | PhoneInfoApp |
 
+When app type is `2`, the FlashApp subblocks decoded so far are:
+
+| Subblock | Meaning |
+| --- | --- |
+| `0x01` | max transfer size |
+| `0x02` | write buffer size |
+| `0x03` | eMMC size in sectors |
+| `0x04` | SD card size in sectors |
+| `0x05` | platform ID |
+| `0x0d` | async support |
+| `0x0f` | security state bits |
+| `0x10` | secure FFU protocol mask |
+| `0x1f` | MMOS over USB support |
+| `0x20` | CRC header info |
+
 ## `NOKD`
 
 WPinternals names `NOKD` as `DisableTimeoutsSignature` and exposes it as `DisableRebootTimeOut()` on the common Lumia UEFI model.
