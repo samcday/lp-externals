@@ -566,38 +566,47 @@ fn send_reset_when_available(vid: u16, pid: u16) -> Result<u8> {
 }
 
 fn shutdown(vid: u16, pid: u16, wait: bool) -> Result<()> {
-    let app = with_device_allow_release_disconnect(vid, pid, wait, |handle, endpoints| {
-        let identification =
-            send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")?;
-        let app = parse_nokv_app_type(&identification)?;
+    let (app, ack_read) =
+        with_device_allow_release_disconnect(vid, pid, wait, |handle, endpoints| {
+            let identification =
+                send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")?;
+            let app = parse_nokv_app_type(&identification)?;
 
-        if app == 3 {
-            send_raw_void_command(handle, endpoints.out_addr, b"NOKA")?;
-        } else {
-            ensure_shutdown_supported_app(app)?;
-            send_raw_void_command(handle, endpoints.out_addr, b"NOKZ")?;
-        }
+            let mut ack_read = false;
+            if app == 3 {
+                send_raw_void_command(handle, endpoints.out_addr, b"NOKA")?;
+            } else {
+                ensure_shutdown_supported_app(app)?;
+                ack_read =
+                    send_raw_shutdown_command(handle, endpoints.out_addr, endpoints.in_addr)?;
+            }
 
-        Ok(app)
-    })?;
+            Ok((app, ack_read))
+        })?;
 
     if app == 3 {
         println!("PhoneInfoApp does not support NOKZ; sent continue-boot command (NOKA)");
-        let next_app = send_shutdown_when_available(vid, pid)?;
+        let (next_app, ack_read) = send_shutdown_when_available(vid, pid)?;
 
         println!(
             "sent shutdown command (NOKZ) after PhoneInfoApp continued to {}",
             app_type_name(next_app)
         );
+        if !ack_read {
+            println!("device disconnected before the NOKZ response could be read");
+        }
         return Ok(());
     }
 
     println!("sent shutdown command (NOKZ)");
+    if !ack_read {
+        println!("device disconnected before the NOKZ response could be read");
+    }
 
     Ok(())
 }
 
-fn send_shutdown_when_available(vid: u16, pid: u16) -> Result<u8> {
+fn send_shutdown_when_available(vid: u16, pid: u16) -> Result<(u8, bool)> {
     let started = std::time::Instant::now();
     let mut last_error = None;
 
@@ -607,10 +616,11 @@ fn send_shutdown_when_available(vid: u16, pid: u16) -> Result<u8> {
                 send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")?;
             let app = parse_nokv_app_type(&identification)?;
             ensure_shutdown_supported_app(app)?;
-            send_raw_void_command(handle, endpoints.out_addr, b"NOKZ")?;
-            Ok(app)
+            let ack_read =
+                send_raw_shutdown_command(handle, endpoints.out_addr, endpoints.in_addr)?;
+            Ok((app, ack_read))
         }) {
-            Ok(app) => return Ok(app),
+            Ok(result) => return Ok(result),
             Err(err) => {
                 last_error = Some(err);
                 std::thread::sleep(DEVICE_POLL_INTERVAL);
@@ -937,6 +947,42 @@ fn send_raw_void_command(
     }
 
     Ok(())
+}
+
+fn send_raw_shutdown_command(
+    handle: &mut DeviceHandle<GlobalContext>,
+    out_addr: u8,
+    in_addr: u8,
+) -> Result<bool> {
+    let written = handle
+        .write_bulk(out_addr, b"NOKZ", DEFAULT_TIMEOUT)
+        .with_context(|| format!("failed to write to bulk OUT endpoint 0x{out_addr:02x}"))?;
+
+    if written != b"NOKZ".len() {
+        bail!(
+            "short USB write: wrote {written} of {} bytes",
+            b"NOKZ".len()
+        );
+    }
+
+    let mut buffer = vec![0; 0x8000];
+    let read = match handle.read_bulk(in_addr, &mut buffer, DEFAULT_TIMEOUT) {
+        Ok(read) => read,
+        Err(rusb::Error::NoDevice) => return Ok(false),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read from bulk IN endpoint 0x{in_addr:02x}"));
+        }
+    };
+    buffer.truncate(read);
+
+    ensure!(
+        buffer == b"NOKZ",
+        "unexpected NOKZ response: {}",
+        hex_dump(&buffer)
+    );
+
+    Ok(true)
 }
 
 fn make_read_param_request(name: &str) -> Vec<u8> {
