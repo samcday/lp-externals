@@ -3,9 +3,13 @@ use std::{fmt, time::Duration};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
 use rusb::{Device, DeviceHandle, Direction, GlobalContext, TransferType, UsbContext};
+use serde::Deserialize;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const LUMIADB_DATABASE_URL: &str = "https://lumiadb.com/database.json";
+const LUMIADB_API_BASE: &str = "https://api.lumiadb.com";
+const LUMIA_520_SBL3: &str = "Engineering-SBL3-Lumia-520-620-625-720-1320.bin";
 
 #[derive(Debug, Parser)]
 #[command(name = "lp-externals")]
@@ -91,6 +95,32 @@ enum Command {
     Gpt {
         #[command(subcommand)]
         command: GptCommand,
+    },
+
+    /// LumiaDB catalog and blob planning commands.
+    Lumiadb {
+        #[command(subcommand)]
+        command: LumiaDbCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LumiaDbCommand {
+    /// Search LumiaDB database entries by model, name, variant, or product code.
+    Search {
+        /// Search query, for example RM-914 or 059S083.
+        query: String,
+    },
+
+    /// Plan downloads for a model/product code pair.
+    Plan {
+        /// Hardware model, for example RM-914.
+        #[arg(long, default_value = "RM-914")]
+        model: String,
+
+        /// Product code, for example 059S083.
+        #[arg(long)]
+        product_code: Option<String>,
     },
 }
 
@@ -207,7 +237,55 @@ fn main() -> Result<()> {
         Command::Gpt { command } => match command {
             GptCommand::Dump { vid, pid, format } => gpt_dump(vid, pid, cli.wait, format),
         },
+        Command::Lumiadb { command } => match command {
+            LumiaDbCommand::Search { query } => lumiadb_search(&query),
+            LumiaDbCommand::Plan {
+                model,
+                product_code,
+            } => lumiadb_plan(&model, product_code.as_deref()),
+        },
     }
+}
+
+fn lumiadb_search(query: &str) -> Result<()> {
+    let database = fetch_lumiadb_database()?;
+    let normalized = query.to_lowercase();
+    let mut matches = 0usize;
+
+    for device in database.iter().filter(|device| device.matches(&normalized)) {
+        matches += 1;
+        println!(
+            "{} - {} ({})",
+            device.hardware_model, device.phone_model, device.variant
+        );
+        if !device.product_codes.is_empty() {
+            println!("  product codes: {}", device.product_codes.join(", "));
+        }
+        for firmware in &device.firmwares {
+            println!(
+                "  {} {} product={} file={}",
+                firmware.firmware,
+                firmware.os.as_deref().unwrap_or("unknown OS"),
+                firmware.product_code,
+                firmware.ffu_filename
+            );
+        }
+    }
+
+    if matches == 0 {
+        println!("no LumiaDB entries matched {query}");
+    }
+
+    Ok(())
+}
+
+fn lumiadb_plan(model: &str, product_code: Option<&str>) -> Result<()> {
+    let database = fetch_lumiadb_database()?;
+    let plan = make_lumiadb_plan(&database, model, product_code)?;
+
+    print_lumiadb_plan(&plan);
+
+    Ok(())
 }
 
 fn identify(vid: u16, pid: u16, wait: bool) -> Result<()> {
@@ -662,6 +740,159 @@ fn print_known_param_decode(name: &str, value: &[u8]) {
         }
         _ => {}
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct LumiaDbDevice {
+    #[serde(rename = "hardwareModel")]
+    hardware_model: String,
+    #[serde(rename = "phoneModel")]
+    phone_model: String,
+    #[serde(default)]
+    variant: String,
+    #[serde(rename = "productCodes", default)]
+    product_codes: Vec<String>,
+    #[serde(default)]
+    firmwares: Vec<LumiaDbFirmware>,
+}
+
+impl LumiaDbDevice {
+    fn matches(&self, query: &str) -> bool {
+        self.hardware_model.to_lowercase().contains(query)
+            || self.phone_model.to_lowercase().contains(query)
+            || self.variant.to_lowercase().contains(query)
+            || self
+                .product_codes
+                .iter()
+                .any(|code| code.to_lowercase().contains(query))
+            || self
+                .firmwares
+                .iter()
+                .any(|firmware| firmware.matches(query))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LumiaDbFirmware {
+    #[serde(rename = "packageTitle", default)]
+    package_title: String,
+    #[serde(default)]
+    firmware: String,
+    #[serde(default)]
+    os: Option<String>,
+    #[serde(rename = "productCode", default)]
+    product_code: String,
+    #[serde(rename = "ffuFilename")]
+    ffu_filename: String,
+}
+
+impl LumiaDbFirmware {
+    fn matches(&self, query: &str) -> bool {
+        self.package_title.to_lowercase().contains(query)
+            || self.firmware.to_lowercase().contains(query)
+            || self.product_code.to_lowercase().contains(query)
+            || self.ffu_filename.to_lowercase().contains(query)
+            || self
+                .os
+                .as_deref()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains(query)
+    }
+}
+
+struct LumiaDbPlan<'a> {
+    device: &'a LumiaDbDevice,
+    firmware: &'a LumiaDbFirmware,
+    ffu_url: String,
+    emergency_url: String,
+    sbl3_url: String,
+}
+
+fn fetch_lumiadb_database() -> Result<Vec<LumiaDbDevice>> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("lp-externals/0.1")
+        .build()
+        .context("failed to build HTTP client")?;
+    let response = client
+        .get(LUMIADB_DATABASE_URL)
+        .send()
+        .context("failed to fetch LumiaDB database")?
+        .error_for_status()
+        .context("LumiaDB database request failed")?;
+
+    response
+        .json::<Vec<LumiaDbDevice>>()
+        .context("failed to parse LumiaDB database")
+}
+
+fn make_lumiadb_plan<'a>(
+    database: &'a [LumiaDbDevice],
+    model: &str,
+    product_code: Option<&str>,
+) -> Result<LumiaDbPlan<'a>> {
+    let devices = database
+        .iter()
+        .filter(|device| device.hardware_model.eq_ignore_ascii_case(model))
+        .collect::<Vec<_>>();
+
+    ensure!(!devices.is_empty(), "no LumiaDB entries found for {model}");
+
+    let firmware = if let Some(product_code) = product_code {
+        devices
+            .iter()
+            .flat_map(|device| {
+                device
+                    .firmwares
+                    .iter()
+                    .map(move |firmware| (*device, firmware))
+            })
+            .find(|(_, firmware)| firmware.product_code.eq_ignore_ascii_case(product_code))
+            .with_context(|| {
+                format!("no LumiaDB firmware found for {model} product code {product_code}")
+            })?
+    } else {
+        devices
+            .iter()
+            .flat_map(|device| {
+                device
+                    .firmwares
+                    .iter()
+                    .map(move |firmware| (*device, firmware))
+            })
+            .next()
+            .with_context(|| format!("no LumiaDB firmware files listed for {model}"))?
+    };
+
+    let (device, firmware) = firmware;
+
+    Ok(LumiaDbPlan {
+        device,
+        firmware,
+        ffu_url: format!(
+            "{}/{}/{}",
+            LUMIADB_API_BASE, device.hardware_model, firmware.ffu_filename
+        ),
+        emergency_url: format!(
+            "{}/{}/{}.zip",
+            LUMIADB_API_BASE, device.hardware_model, device.hardware_model
+        ),
+        sbl3_url: format!("{}/SBL3/{}", LUMIADB_API_BASE, LUMIA_520_SBL3),
+    })
+}
+
+fn print_lumiadb_plan(plan: &LumiaDbPlan<'_>) {
+    println!("model: {}", plan.device.hardware_model);
+    println!("phone: {}", plan.device.phone_model);
+    println!("variant: {}", plan.device.variant);
+    println!("product code: {}", plan.firmware.product_code);
+    println!("firmware: {}", plan.firmware.firmware);
+    if let Some(os) = &plan.firmware.os {
+        println!("os: {os}");
+    }
+    println!("ffu: {}", plan.ffu_url);
+    println!("emergency: {}", plan.emergency_url);
+    println!("sbl3: {}", plan.sbl3_url);
 }
 
 fn print_identification(response: &[u8]) {
