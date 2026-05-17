@@ -27,7 +27,7 @@ cargo run -- raw NOKV
 | `NOKT` | `GetGPTSignature` | Read-only GPT query. Used by `gpt dump`. |
 | `NOKS` | `RebootToFlashAppSignature` | Switch/reboot to FlashApp mode. Mode-changing. Not used by read-only commands. |
 | `NOKP` | `RebootToPhoneInfoAppSignature` | Switch/reboot to PhoneInfoApp mode. Mode-changing. |
-| `NOKR` | `RebootSignature` | Reboot. |
+| `NOKR` | `RebootSignature` | Reboot. WPinternals sends this as write-only and does not wait for a response. Used by `reset`. |
 | `NOKA` | `ContinueBootSignature` | Continue normal boot where supported. |
 | `NOKM` | `RebootToMassStorageSignature` | Switch/reboot to mass storage where supported. Mode-changing. |
 | `NOKZ` | `ShutdownSignature` | Shutdown. |
@@ -73,6 +73,16 @@ response ascii: NOKD
 ```
 
 That simple echo is currently treated as success.
+
+## `NOKR`
+
+WPinternals names `NOKR` as `RebootSignature` and uses it for `ResetPhone()`.
+
+Unlike read commands such as `NOKV`, WPinternals writes `NOKR` and does not read a response. The phone may disconnect immediately after the USB write.
+
+```sh
+cargo run -- reset
+```
 
 ## Current Quirks
 

@@ -42,6 +42,17 @@ enum Command {
         commands: Vec<String>,
     },
 
+    /// Reboot the phone with the write-only NOKR command.
+    Reset {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
+    },
+
     /// GPT-related commands.
     Gpt {
         #[command(subcommand)]
@@ -88,6 +99,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Identify { vid, pid } => identify(vid, pid),
         Command::Raw { vid, pid, commands } => raw(vid, pid, &commands),
+        Command::Reset { vid, pid } => reset(vid, pid),
         Command::Gpt { command } => match command {
             GptCommand::Dump { vid, pid, format } => gpt_dump(vid, pid, format),
         },
@@ -129,6 +141,16 @@ fn raw(vid: u16, pid: u16, commands: &[String]) -> Result<()> {
 
         print_raw_response(response);
     }
+
+    Ok(())
+}
+
+fn reset(vid: u16, pid: u16) -> Result<()> {
+    with_device(vid, pid, |handle, endpoints| {
+        send_raw_void_command(handle, endpoints.out_addr, b"NOKR")
+    })?;
+
+    println!("sent reset command (NOKR)");
 
     Ok(())
 }
@@ -283,6 +305,25 @@ fn send_raw_command(
     buffer.truncate(read);
 
     Ok(buffer)
+}
+
+fn send_raw_void_command(
+    handle: &mut DeviceHandle<GlobalContext>,
+    out_addr: u8,
+    command: &[u8],
+) -> Result<()> {
+    let written = handle
+        .write_bulk(out_addr, command, DEFAULT_TIMEOUT)
+        .with_context(|| format!("failed to write to bulk OUT endpoint 0x{out_addr:02x}"))?;
+
+    if written != command.len() {
+        bail!(
+            "short USB write: wrote {written} of {} bytes",
+            command.len()
+        );
+    }
+
+    Ok(())
 }
 
 fn print_identification(response: &[u8]) {
