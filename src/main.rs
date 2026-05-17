@@ -93,6 +93,21 @@ enum Command {
         pid: u16,
     },
 
+    /// Run the FlashApp factory-reset command after confirming the phone IMEI.
+    FactoryReset {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
+
+        /// Exact phone IMEI required before sending the destructive NOKG command.
+        #[arg(long)]
+        confirm_imei: String,
+    },
+
     /// Mode switching commands.
     Switch {
         #[command(subcommand)]
@@ -327,6 +342,11 @@ fn main() -> Result<()> {
         Command::StayAwake { vid, pid } => commands::stay_awake::run(vid, pid, cli.wait),
         Command::Reset { vid, pid } => commands::reset::run(vid, pid, cli.wait),
         Command::Shutdown { vid, pid } => commands::shutdown::run(vid, pid, cli.wait),
+        Command::FactoryReset {
+            vid,
+            pid,
+            confirm_imei,
+        } => commands::factory_reset::run(vid, pid, cli.wait, &confirm_imei),
         Command::Switch { command } => match command {
             SwitchCommand::Flash { vid, pid } => commands::switch::flash(vid, pid, cli.wait),
             SwitchCommand::PhoneInfo { vid, pid } => {

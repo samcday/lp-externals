@@ -35,11 +35,12 @@ cargo run -- stay-awake
 | `NOKT` | `GetGPTSignature` | Read-only GPT query. Used by `gpt dump`. |
 | `NOKS` | `RebootToFlashAppSignature` | Switch/reboot to FlashApp mode. Mode-changing. Used by `switch flash`. |
 | `NOKP` | `RebootToPhoneInfoAppSignature` | Switch/reboot to PhoneInfoApp mode. Mode-changing. Used by `switch phone-info`. |
+| `NOKG` | `FactoryResetSignature` | FlashApp factory reset. Destructive. Used by `factory-reset` after IMEI confirmation. WPinternals notes that it erases `MODEM_FS1` and `MODEM_FS2`, then restores `MODEM_FSG` to `MODEM_FS1`. This is not a full stock FFU restore. |
 | `NOKR` | `RebootSignature` | Reboot. WPinternals sends this as write-only and does not wait for a response. Used by `reset`. |
 | `NOKA` | `ContinueBootSignature` | Continue normal boot where supported. |
 | `NOKM` | `RebootToMassStorageSignature` | Switch/reboot to mass storage where supported. Mode-changing. |
 | `NOKZ` | `ShutdownSignature` | Shutdown. |
-| `NOKXFR` | `ReadParamSignature` | FlashApp parameter read. Used by `param read`. |
+| `NOKXFR` | `ReadParamSignature` | FlashApp parameter read. Used by `flash param read`. |
 | `NOKXPH` | `GetVariableSignature` | PhoneInfoApp variable read. Used by `phone-info read`. |
 
 ## `NOKV` Response
@@ -123,6 +124,8 @@ This is mode-changing. It writes `NOKS` and does not wait for a response.
 cargo run -- switch flash
 ```
 
+`switch flash` is app-aware plumbing: it verifies the current app, sends `NOKS` from BootMgr, or escapes PhoneInfoApp with `NOKA` before switching. Raw `NOKS` remains available through `raw NOKS`.
+
 ## `NOKP`
 
 WPinternals names `NOKP` as `RebootToPhoneInfoAppSignature` and uses it to enter PhoneInfoApp mode from BootMgr or FlashApp.
@@ -168,6 +171,7 @@ Examples:
 ```sh
 cargo run -- phone-info read TYPE
 cargo run -- phone-info read CTR
+cargo run -- phone-info read IMEI
 ```
 
 ## FlashApp Parameters
@@ -199,11 +203,22 @@ Useful parameters for the unlock path:
 Examples:
 
 ```sh
-cargo run -- param read RRKH
-cargo run -- param read FAI
-cargo run -- param read SS
-cargo run -- param read DPI
+cargo run -- flash param read RRKH
+cargo run -- flash param read FAI
+cargo run -- flash param read SS
+cargo run -- flash param read DPI
 ```
+
+## Factory Reset
+
+The `factory-reset` porcelain reads the phone IMEI in PhoneInfoApp, requires an exact `--confirm-imei` match, switches to FlashApp through the shared app-mode plumbing, then sends `NOKG`.
+
+```sh
+cargo run -- phone-info read IMEI
+cargo run -- factory-reset --confirm-imei 123456789012345
+```
+
+This is FlashApp's modem factory-reset primitive, not a signed FFU stock restore.
 
 ## Current Quirks
 

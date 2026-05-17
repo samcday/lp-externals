@@ -18,7 +18,7 @@ Observed values for this phone:
 | FlashApp protocol/app | `1.15` / `1.28` |
 | PhoneInfo variables | `TYPE=RM-914`, `CTR=059S083` |
 
-Current FlashApp security status from `param read SS`:
+Current FlashApp security status from `flash param read SS`:
 
 | Field | Value |
 | --- | --- |
@@ -40,12 +40,12 @@ cargo run -- identify
 cargo run -- gpt dump
 cargo run -- switch flash
 cargo run -- identify
-cargo run -- param read RRKH
-cargo run -- param read FAI
-cargo run -- param read SS
-cargo run -- param read FCS
-cargo run -- param read DPI
-cargo run -- param read FVER
+cargo run -- flash param read RRKH
+cargo run -- flash param read FAI
+cargo run -- flash param read SS
+cargo run -- flash param read FCS
+cargo run -- flash param read DPI
+cargo run -- flash param read FVER
 cargo run -- switch phone-info
 cargo run -- phone-info read TYPE
 cargo run -- phone-info read CTR
@@ -370,12 +370,12 @@ Collect these before attempting any destructive step:
 
 | Fact | Command | Use |
 | --- | --- | --- |
-| Root Key Hash | `param read RRKH` | Match emergency loader and verify FFU `SBL1` RKH |
-| Flash app version | `param read FAI` and `identify` in FlashApp | WPinternals wants FlashApp `>= 1.28` for V1 unlock |
-| Security status | `param read SS` | Detect already unlocked/authenticated/RDC/secure-FFU-disabled cases |
-| Security flags | `param read FCS` | Extra fuse/security detail |
-| Platform ID | `param read DPI` or FlashApp `identify` | Match FFU/platform profile |
-| Firmware version | `param read FVER` | Helps locate FFU and donor FFU, if available |
+| Root Key Hash | `flash param read RRKH` | Match emergency loader and verify FFU `SBL1` RKH |
+| Flash app version | `flash param read FAI` and `identify` in FlashApp | WPinternals wants FlashApp `>= 1.28` for V1 unlock |
+| Security status | `flash param read SS` | Detect already unlocked/authenticated/RDC/secure-FFU-disabled cases |
+| Security flags | `flash param read FCS` | Extra fuse/security detail |
+| Platform ID | `flash param read DPI` or FlashApp `identify` | Match FFU/platform profile |
+| Firmware version | `flash param read FVER` | Helps locate FFU and donor FFU, if available |
 | Product type | `phone-info read TYPE` | Exact RM model for LumiaDB lookup |
 | Product code | `phone-info read CTR` | Exact firmware variant for LumiaDB lookup |
 | GPT layout | `gpt dump` | Confirms partition names and sector ranges |
