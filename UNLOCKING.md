@@ -9,7 +9,7 @@ This project is not ready to unlock yet. The current goal is to collect the fact
 Use these to identify the device and gather unlock-relevant facts:
 
 ```sh
-cargo run -- raw NOKD
+cargo run -- stay-awake
 cargo run -- identify
 cargo run -- gpt dump
 cargo run -- switch flash
@@ -20,9 +20,49 @@ cargo run -- param read SS
 cargo run -- param read FCS
 cargo run -- param read DPI
 cargo run -- param read FVER
+cargo run -- switch phone-info
+cargo run -- phone-info read TYPE
+cargo run -- phone-info read CTR
 ```
 
-`switch flash` is mode-changing. The others above are read-only except `NOKD`, which disables the BootMgr reboot timeout.
+`switch flash` and `switch phone-info` are mode-changing. The others above are read-only except `stay-awake`, which disables the BootMgr reboot timeout.
+
+Observed values for this phone:
+
+| Fact | Value |
+| --- | --- |
+| Product type | `RM-914` |
+| Product code | `059S083` |
+| Platform ID | `Nokia.MSM8227.P6036.1.2` |
+| Root Key Hash | `f771e62af89994064f77cd3bc16829503bdf9a3d506d3facecaef3f808c868fd` |
+| Flash app | `1.28` |
+
+## LumiaDB Blob Planning
+
+LumiaDB can provide the exact FFU, the model emergency package, and the shared engineering SBL3 file:
+
+```sh
+cargo run -- lumiadb plan --model RM-914 --product-code 059S083
+cargo run -- lumiadb check --model RM-914 --product-code 059S083
+cargo run -- lumiadb download --model RM-914 --product-code 059S083
+```
+
+Current LumiaDB plan:
+
+| Blob | URL |
+| --- | --- |
+| FFU | `https://api.lumiadb.com/RM-914/RM914_3058.50000.1425.0001_RETAIL_eu_euro2_218_01_452872_prd_signed.ffu` |
+| Emergency package | `https://api.lumiadb.com/RM-914/RM-914.zip` |
+| Engineering SBL3 | `https://api.lumiadb.com/SBL3/Engineering-SBL3-Lumia-520-620-625-720-1320.bin` |
+
+`lumiadb download` writes under `blobs/<model>/<product-code>/` and creates a `manifest.json`.
+
+After downloading the FFU, inspect it offline:
+
+```sh
+cargo run -- ffu info blobs/RM-914/059S083/RM914_3058.50000.1425.0001_RETAIL_eu_euro2_218_01_452872_prd_signed.ffu
+cargo run -- ffu partitions blobs/RM-914/059S083/RM914_3058.50000.1425.0001_RETAIL_eu_euro2_218_01_452872_prd_signed.ffu
+```
 
 ## Required Files
 
@@ -47,6 +87,8 @@ Collect these before attempting any destructive step:
 | Security flags | `param read FCS` | Extra fuse/security detail. |
 | Platform ID | `param read DPI` or FlashApp `identify` | Useful for matching resources and sanity checks. |
 | Firmware version | `param read FVER` | Helps locate correct FFU and donor FFU. |
+| Product type | `phone-info read TYPE` | Exact RM model for LumiaDB lookup. |
+| Product code | `phone-info read CTR` | Exact firmware variant for LumiaDB lookup. |
 | GPT layout | `gpt dump` | Confirms partition names and sector ranges before any patch/flash logic. |
 
 ## WPinternals Spec A Flow Summary
