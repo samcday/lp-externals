@@ -83,6 +83,17 @@ enum Command {
         pid: u16,
     },
 
+    /// Power off the phone with NOKZ where supported.
+    Shutdown {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
+    },
+
     /// Mode switching commands.
     Switch {
         #[command(subcommand)]
@@ -281,6 +292,7 @@ fn main() -> Result<()> {
         Command::Raw { vid, pid, commands } => raw(vid, pid, cli.wait, &commands),
         Command::StayAwake { vid, pid } => stay_awake(vid, pid, cli.wait),
         Command::Reset { vid, pid } => reset(vid, pid, cli.wait),
+        Command::Shutdown { vid, pid } => shutdown(vid, pid, cli.wait),
         Command::Switch { command } => match command {
             SwitchCommand::Flash { vid, pid } => switch_flash(vid, pid, cli.wait),
             SwitchCommand::PhoneInfo { vid, pid } => switch_phone_info(vid, pid, cli.wait),
@@ -550,6 +562,65 @@ fn send_reset_when_available(vid: u16, pid: u16) -> Result<u8> {
     match last_error {
         Some(err) => Err(err).context("timed out waiting for reset-capable app after NOKA"),
         None => bail!("timed out waiting for reset-capable app after NOKA"),
+    }
+}
+
+fn shutdown(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    let app = with_device_allow_release_disconnect(vid, pid, wait, |handle, endpoints| {
+        let identification =
+            send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")?;
+        let app = parse_nokv_app_type(&identification)?;
+
+        if app == 3 {
+            send_raw_void_command(handle, endpoints.out_addr, b"NOKA")?;
+        } else {
+            ensure_shutdown_supported_app(app)?;
+            send_raw_void_command(handle, endpoints.out_addr, b"NOKZ")?;
+        }
+
+        Ok(app)
+    })?;
+
+    if app == 3 {
+        println!("PhoneInfoApp does not support NOKZ; sent continue-boot command (NOKA)");
+        let next_app = send_shutdown_when_available(vid, pid)?;
+
+        println!(
+            "sent shutdown command (NOKZ) after PhoneInfoApp continued to {}",
+            app_type_name(next_app)
+        );
+        return Ok(());
+    }
+
+    println!("sent shutdown command (NOKZ)");
+
+    Ok(())
+}
+
+fn send_shutdown_when_available(vid: u16, pid: u16) -> Result<u8> {
+    let started = std::time::Instant::now();
+    let mut last_error = None;
+
+    while started.elapsed() < RESET_RETRY_TIMEOUT {
+        match with_device_allow_release_disconnect(vid, pid, false, |handle, endpoints| {
+            let identification =
+                send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")?;
+            let app = parse_nokv_app_type(&identification)?;
+            ensure_shutdown_supported_app(app)?;
+            send_raw_void_command(handle, endpoints.out_addr, b"NOKZ")?;
+            Ok(app)
+        }) {
+            Ok(app) => return Ok(app),
+            Err(err) => {
+                last_error = Some(err);
+                std::thread::sleep(DEVICE_POLL_INTERVAL);
+            }
+        }
+    }
+
+    match last_error {
+        Some(err) => Err(err).context("timed out waiting for shutdown-capable app after NOKA"),
+        None => bail!("timed out waiting for shutdown-capable app after NOKA"),
     }
 }
 
@@ -964,6 +1035,17 @@ fn ensure_reset_supported_app(app: u8) -> Result<()> {
     ensure!(
         matches!(app, 1 | 2),
         "reset requires BootManager or FlashApp after PhoneInfoApp escape, but NOKV reports app type {} ({})",
+        app,
+        app_type_name(app)
+    );
+
+    Ok(())
+}
+
+fn ensure_shutdown_supported_app(app: u8) -> Result<()> {
+    ensure!(
+        matches!(app, 1 | 2),
+        "shutdown requires BootManager or FlashApp after PhoneInfoApp escape, but NOKV reports app type {} ({})",
         app,
         app_type_name(app)
     );
