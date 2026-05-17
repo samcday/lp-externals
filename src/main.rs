@@ -1,5 +1,6 @@
 use std::{
     fmt, fs,
+    io::{Cursor, Read},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -9,6 +10,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use gosh_dl::{DownloadEngine, DownloadEvent, DownloadOptions, EngineConfig};
 use rusb::{Device, DeviceHandle, Direction, GlobalContext, TransferType, UsbContext};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use zip::ZipArchive;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -129,6 +132,35 @@ enum Command {
         #[command(subcommand)]
         command: FfuCommand,
     },
+
+    /// Offline Qualcomm image and loader inspection commands.
+    Qcom {
+        #[command(subcommand)]
+        command: QcomCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum QcomCommand {
+    /// Parse a raw or Intel HEX Qualcomm image and print signing metadata.
+    ImageInfo {
+        /// Raw image or Intel HEX path.
+        path: PathBuf,
+
+        /// Header search offset for raw images.
+        #[arg(long, default_value = "0x0", value_parser = parse_u32)]
+        offset: u32,
+    },
+
+    /// Scan a Lumia emergency zip or directory for ARMPRG loaders matching an RRKH.
+    ScanLoaders {
+        /// Emergency zip, loader file, or directory.
+        path: PathBuf,
+
+        /// Expected Root Key Hash as hex, for example from `param read RRKH`.
+        #[arg(long)]
+        rrkh: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -143,6 +175,18 @@ enum FfuCommand {
     Partitions {
         /// FFU path.
         path: PathBuf,
+    },
+
+    /// Extract a named partition from an FFU.
+    Extract {
+        /// FFU path.
+        path: PathBuf,
+
+        /// Partition name, for example SBL1, SBL2, SBL3, UEFI, TZ, RPM, WINSECAPP, or EFIESP.
+        partition: String,
+
+        /// Output path for raw partition bytes.
+        output: PathBuf,
     },
 }
 
@@ -329,6 +373,15 @@ fn main() -> Result<()> {
         Command::Ffu { command } => match command {
             FfuCommand::Info { path } => ffu_info(&path),
             FfuCommand::Partitions { path } => ffu_partitions(&path),
+            FfuCommand::Extract {
+                path,
+                partition,
+                output,
+            } => ffu_extract(&path, &partition, &output),
+        },
+        Command::Qcom { command } => match command {
+            QcomCommand::ImageInfo { path, offset } => qcom_image_info(&path, offset),
+            QcomCommand::ScanLoaders { path, rrkh } => qcom_scan_loaders(&path, rrkh.as_deref()),
         },
     }
 }
@@ -355,6 +408,97 @@ fn ffu_partitions(path: &Path) -> Result<()> {
     let ffu = ParsedFfu::open(path)?;
     let gpt = ffu.get_sectors(1, 0x21)?;
     print_gpt(&gpt)
+}
+
+fn ffu_extract(path: &Path, partition: &str, output: &Path) -> Result<()> {
+    let ffu = ParsedFfu::open(path)?;
+    let bytes = ffu.get_partition(partition)?;
+
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+    }
+
+    fs::write(output, &bytes).with_context(|| format!("failed to write {}", output.display()))?;
+    println!(
+        "extracted {} ({} bytes) to {}",
+        partition,
+        bytes.len(),
+        output.display()
+    );
+
+    Ok(())
+}
+
+fn qcom_image_info(path: &Path, offset: u32) -> Result<()> {
+    let source = read_qcom_source(path)?;
+    let image = QualcommImage::parse(&source.bytes, offset)
+        .with_context(|| format!("failed to parse Qualcomm image in {}", path.display()))?;
+
+    println!("path: {}", path.display());
+    println!("source format: {}", source.format);
+    println!("source bytes: {}", source.bytes.len());
+    print_qcom_image(&image);
+
+    Ok(())
+}
+
+fn qcom_scan_loaders(path: &Path, rrkh: Option<&str>) -> Result<()> {
+    let expected_rrkh = rrkh.map(parse_hex_bytes).transpose()?;
+    if let Some(rrkh) = &expected_rrkh {
+        ensure!(
+            rrkh.len() == 0x20,
+            "RRKH must be 32 bytes, got {}",
+            rrkh.len()
+        );
+    }
+
+    let candidates = read_qcom_candidates(path)?;
+    ensure!(!candidates.is_empty(), "no loader candidates found");
+
+    let mut matches = 0usize;
+    for candidate in candidates {
+        print!("{}: ", candidate.name);
+
+        if candidate.bytes.len() > 0x80000 {
+            println!("skip size={} (> 0x80000)", candidate.bytes.len());
+            continue;
+        }
+
+        match QualcommImage::parse(&candidate.bytes, 0) {
+            Ok(image) => {
+                let armprg = contains_utf16le(&candidate.bytes, "QHSUSB_ARMPRG");
+                let rkh_matches = expected_rrkh
+                    .as_deref()
+                    .is_none_or(|rrkh| image.root_key_hash.as_deref() == Some(rrkh));
+                let status = if armprg && rkh_matches {
+                    matches += 1;
+                    "MATCH"
+                } else {
+                    "skip"
+                };
+
+                println!(
+                    "{status} format={} size={} armprg={} rkh={}",
+                    candidate.format,
+                    candidate.bytes.len(),
+                    armprg,
+                    image
+                        .root_key_hash
+                        .as_deref()
+                        .map(hex_dump_compact)
+                        .unwrap_or_else(|| "none".to_string())
+                );
+            }
+            Err(err) => println!("skip parse-error={err:#}"),
+        }
+    }
+
+    println!("matching loaders: {matches}");
+
+    Ok(())
 }
 
 fn lumiadb_search(query: &str) -> Result<()> {
@@ -1300,6 +1444,144 @@ struct PlannedBlob {
     filename: String,
 }
 
+struct QcomSource {
+    format: &'static str,
+    bytes: Vec<u8>,
+}
+
+struct QcomCandidate {
+    name: String,
+    format: &'static str,
+    bytes: Vec<u8>,
+}
+
+struct QualcommImage {
+    header_type: &'static str,
+    image_offset: u32,
+    header_offset: u32,
+    image_address: u32,
+    image_size: u32,
+    code_size: u32,
+    signature_address: u32,
+    signature_size: u32,
+    certificates_address: u32,
+    certificates_size: u32,
+    root_key_hash: Option<Vec<u8>>,
+}
+
+impl QualcommImage {
+    fn parse(bytes: &[u8], offset: u32) -> Result<Self> {
+        let mut image_offset = offset;
+        let header_offset;
+        let header_type;
+
+        if bytes.get(offset as usize..offset as usize + 4) == Some(b"\x7fELF") {
+            header_type = "elf";
+            let elf_class = *bytes
+                .get(offset as usize + 4)
+                .context("ELF header missing class")?;
+            if elf_class == 1 {
+                let program_header_offset = offset
+                    .checked_add(le_u32(bytes, offset as usize + 0x1c)?)
+                    .context("ELF program header offset overflow")?;
+                let program_header_entry_size = le_u16(bytes, offset as usize + 0x2a)? as u32;
+                let hash_program_header_offset = program_header_offset
+                    .checked_add(program_header_entry_size)
+                    .context("ELF hash program header offset overflow")?;
+                image_offset = offset
+                    .checked_add(le_u32(bytes, hash_program_header_offset as usize + 0x04)?)
+                    .context("ELF image offset overflow")?;
+                header_offset = image_offset
+                    .checked_add(8)
+                    .context("Qualcomm header offset overflow")?;
+            } else if elf_class == 2 {
+                let program_header_offset = offset
+                    .checked_add(le_u32(bytes, offset as usize + 0x20)?)
+                    .context("ELF program header offset overflow")?;
+                let program_header_entry_size = le_u16(bytes, offset as usize + 0x36)? as u32;
+                let hash_program_header_offset = program_header_offset
+                    .checked_add(program_header_entry_size)
+                    .context("ELF hash program header offset overflow")?;
+                image_offset = offset
+                    .checked_add(
+                        u32::try_from(le_u64(bytes, hash_program_header_offset as usize + 0x08)?)
+                            .context("ELF image offset does not fit in u32")?,
+                    )
+                    .context("ELF image offset overflow")?;
+                header_offset = image_offset
+                    .checked_add(8)
+                    .context("Qualcomm header offset overflow")?;
+            } else {
+                bail!("unsupported ELF class {elf_class}");
+            }
+        } else if find_masked_pattern(
+            bytes,
+            offset as usize,
+            LONG_QCOM_HEADER_PATTERN,
+            LONG_QCOM_HEADER_MASK,
+        )
+        .is_none()
+        {
+            header_type = "short";
+            header_offset = image_offset
+                .checked_add(8)
+                .context("Qualcomm header offset overflow")?;
+        } else {
+            header_type = "long";
+            header_offset = image_offset
+                .checked_add(LONG_QCOM_HEADER_PATTERN.len() as u32)
+                .context("Qualcomm header offset overflow")?;
+        }
+
+        let header = header_offset as usize;
+        let explicit_image_offset = le_u32(bytes, header)?;
+        if explicit_image_offset != 0 {
+            image_offset = explicit_image_offset;
+        } else if header_type == "short" || header_type == "elf" {
+            image_offset = image_offset
+                .checked_add(0x28)
+                .context("Qualcomm short image offset overflow")?;
+        } else {
+            image_offset = image_offset
+                .checked_add(0x50)
+                .context("Qualcomm long image offset overflow")?;
+        }
+
+        let image_address = le_u32(bytes, header + 0x04)?;
+        let image_size = le_u32(bytes, header + 0x08)?;
+        let code_size = le_u32(bytes, header + 0x0c)?;
+        let signature_address = le_u32(bytes, header + 0x10)?;
+        let signature_size = le_u32(bytes, header + 0x14)?;
+        let certificates_address = le_u32(bytes, header + 0x18)?;
+        let certificates_size = le_u32(bytes, header + 0x1c)?;
+        let root_key_hash = extract_root_key_hash(bytes);
+
+        Ok(Self {
+            header_type,
+            image_offset,
+            header_offset,
+            image_address,
+            image_size,
+            code_size,
+            signature_address,
+            signature_size,
+            certificates_address,
+            certificates_size,
+            root_key_hash,
+        })
+    }
+}
+
+const LONG_QCOM_HEADER_PATTERN: &[u8] = &[
+    0xd1, 0xdc, 0x4b, 0x84, 0x34, 0x10, 0xd7, 0x73, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff,
+];
+
+const LONG_QCOM_HEADER_MASK: &[u8] = &[
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+];
+
 fn fetch_lumiadb_database() -> Result<Vec<LumiaDbDevice>> {
     let client = http_client()?;
     let response = client
@@ -1312,6 +1594,195 @@ fn fetch_lumiadb_database() -> Result<Vec<LumiaDbDevice>> {
     response
         .json::<Vec<LumiaDbDevice>>()
         .context("failed to parse LumiaDB database")
+}
+
+fn read_qcom_source(path: &Path) -> Result<QcomSource> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("hex"))
+    {
+        return Ok(QcomSource {
+            format: "intel-hex",
+            bytes: parse_intel_hex(&bytes)
+                .with_context(|| format!("failed to parse Intel HEX {}", path.display()))?,
+        });
+    }
+
+    Ok(QcomSource {
+        format: "raw",
+        bytes,
+    })
+}
+
+fn read_qcom_candidates(path: &Path) -> Result<Vec<QcomCandidate>> {
+    if path.is_dir() {
+        let mut candidates = Vec::new();
+        for entry in
+            fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let source = read_qcom_source(&path)?;
+                candidates.push(QcomCandidate {
+                    name: path.display().to_string(),
+                    format: source.format,
+                    bytes: source.bytes,
+                });
+            }
+        }
+        return Ok(candidates);
+    }
+
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+    {
+        let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let mut archive = ZipArchive::new(Cursor::new(bytes))
+            .with_context(|| format!("failed to open zip {}", path.display()))?;
+        let mut candidates = Vec::new();
+
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index)?;
+            if !file.is_file() {
+                continue;
+            }
+
+            let name = file.name().to_string();
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .with_context(|| format!("failed to read {name} from {}", path.display()))?;
+            let (format, bytes) = if name
+                .rsplit_once('.')
+                .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("hex"))
+            {
+                ("intel-hex", parse_intel_hex(&bytes)?)
+            } else {
+                ("raw", bytes)
+            };
+
+            candidates.push(QcomCandidate {
+                name,
+                format,
+                bytes,
+            });
+        }
+
+        return Ok(candidates);
+    }
+
+    let source = read_qcom_source(path)?;
+    Ok(vec![QcomCandidate {
+        name: path.display().to_string(),
+        format: source.format,
+        bytes: source.bytes,
+    }])
+}
+
+fn parse_intel_hex(bytes: &[u8]) -> Result<Vec<u8>> {
+    let text = std::str::from_utf8(bytes).context("Intel HEX is not valid UTF-8")?;
+    let mut result = Vec::new();
+
+    for (line_number, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        ensure!(
+            line.starts_with(':'),
+            "Intel HEX line {} missing ':'",
+            line_number + 1
+        );
+        let record = parse_hex_bytes(&line[1..])?;
+        ensure!(
+            record.len() >= 5,
+            "Intel HEX line {} too short",
+            line_number + 1
+        );
+        let byte_count = record[0] as usize;
+        ensure!(
+            record.len() == byte_count + 5,
+            "Intel HEX line {} length mismatch",
+            line_number + 1
+        );
+
+        if record[3] == 0 {
+            result.extend_from_slice(&record[4..4 + byte_count]);
+        }
+    }
+
+    Ok(result)
+}
+
+fn extract_root_key_hash(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut signatures = Vec::new();
+    let mut last_offset = 0usize;
+
+    for index in 0..bytes.len().saturating_sub(6) {
+        let offset0 = u16::from_le_bytes([bytes[index], bytes[index + 1]]);
+        let offset1 = i16::from_be_bytes([bytes[index + 2], bytes[index + 3]]);
+        let offset2 = u16::from_le_bytes([bytes[index + 4], bytes[index + 5]]);
+
+        if offset0 == 0x8230 && offset1 >= 0 && offset2 == 0x8230 {
+            let certificate_size = offset1 as usize + 4;
+            if last_offset != 0 && last_offset != index {
+                break;
+            }
+            let end = index.checked_add(certificate_size)?;
+            let certificate = bytes.get(index..end)?;
+            signatures.push(certificate.to_vec());
+            last_offset = end;
+        }
+    }
+
+    signatures.last().map(|root| Sha256::digest(root).to_vec())
+}
+
+fn print_qcom_image(image: &QualcommImage) {
+    println!("header type: {}", image.header_type);
+    println!("image offset: 0x{:08x}", image.image_offset);
+    println!("header offset: 0x{:08x}", image.header_offset);
+    println!("image address: 0x{:08x}", image.image_address);
+    println!("image size: {}", image.image_size);
+    println!("code size: {}", image.code_size);
+    println!("signature address: 0x{:08x}", image.signature_address);
+    println!("signature size: {}", image.signature_size);
+    println!("certificates address: 0x{:08x}", image.certificates_address);
+    println!("certificates size: {}", image.certificates_size);
+    if let Some(root_key_hash) = &image.root_key_hash {
+        println!("root key hash: {}", hex_dump_compact(root_key_hash));
+    } else {
+        println!("root key hash: none");
+    }
+}
+
+fn contains_utf16le(bytes: &[u8], needle: &str) -> bool {
+    let encoded = needle
+        .encode_utf16()
+        .flat_map(|word| word.to_le_bytes())
+        .collect::<Vec<_>>();
+    find_bytes(bytes, &encoded).is_some()
+}
+
+fn find_masked_pattern(
+    haystack: &[u8],
+    offset: usize,
+    pattern: &[u8],
+    mask: &[u8],
+) -> Option<usize> {
+    if pattern.len() != mask.len() || offset >= haystack.len() || haystack.len() < pattern.len() {
+        return None;
+    }
+
+    (offset..=haystack.len() - pattern.len()).find(|candidate| {
+        pattern.iter().enumerate().all(|(index, expected)| {
+            mask[index] == 0xff || haystack[candidate + index] == *expected
+        })
+    })
 }
 
 fn http_client() -> Result<reqwest::blocking::Client> {
@@ -1574,6 +2045,160 @@ impl ParsedFfu {
 
         Ok(result)
     }
+
+    fn get_partition(&self, name: &str) -> Result<Vec<u8>> {
+        let gpt_bytes = self.get_sectors(1, 0x21)?;
+        let gpt = ParsedGpt::parse(&gpt_bytes)?;
+        let partition = gpt
+            .partition(name)
+            .with_context(|| format!("FFU does not contain partition {name}"))?;
+        let sector_count = partition
+            .last_lba
+            .checked_sub(partition.first_lba)
+            .and_then(|sectors| sectors.checked_add(1))
+            .context("partition sector range underflow")?;
+        let start_sector = usize::try_from(partition.first_lba)
+            .context("partition start sector does not fit in usize")?;
+        let sector_count =
+            usize::try_from(sector_count).context("partition size does not fit in usize")?;
+
+        self.get_sectors(start_sector, sector_count)
+    }
+}
+
+struct ParsedGpt {
+    partitions: Vec<GptPartition>,
+}
+
+impl ParsedGpt {
+    fn parse(gpt: &[u8]) -> Result<Self> {
+        let layout = GptLayout::parse(gpt)?;
+        let mut partitions = Vec::new();
+
+        for index in 0..layout.partition_entry_count {
+            let offset = layout
+                .entries_offset
+                .checked_add(
+                    usize::try_from(index)
+                        .context("partition index does not fit in usize")?
+                        .checked_mul(layout.entry_size)
+                        .context("partition entry offset overflow")?,
+                )
+                .context("partition entry offset overflow")?;
+            let Some(entry) = gpt.get(offset..offset + layout.entry_size) else {
+                break;
+            };
+
+            if entry[..16].iter().all(|byte| *byte == 0) {
+                continue;
+            }
+
+            partitions.push(GptPartition {
+                index: index + 1,
+                type_guid: format_guid(&entry[0..16]),
+                unique_guid: format_guid(&entry[16..32]),
+                first_lba: le_u64(entry, 32)?,
+                last_lba: le_u64(entry, 40)?,
+                attrs: le_u64(entry, 48)?,
+                name: decode_utf16_name(&entry[56..128]),
+            });
+        }
+
+        Ok(Self { partitions })
+    }
+
+    fn partition(&self, name: &str) -> Option<&GptPartition> {
+        self.partitions
+            .iter()
+            .find(|partition| partition.name.eq_ignore_ascii_case(name))
+    }
+}
+
+struct GptLayout {
+    header_offset: usize,
+    header_size: u32,
+    revision: u32,
+    current_lba: u64,
+    backup_lba: u64,
+    first_usable_lba: u64,
+    last_usable_lba: u64,
+    disk_guid: String,
+    partition_entries_lba: u64,
+    partition_entry_count: u32,
+    entry_size: usize,
+    entries_offset: usize,
+}
+
+impl GptLayout {
+    fn parse(gpt: &[u8]) -> Result<Self> {
+        ensure!(
+            gpt.len() >= 0x200,
+            "GPT payload too short: {} bytes",
+            gpt.len()
+        );
+
+        let header_offset = find_bytes(gpt, b"EFI PART").context("missing GPT header signature")?;
+        let header = gpt
+            .get(header_offset..)
+            .context("GPT payload missing primary header")?;
+
+        ensure!(header.len() >= 92, "GPT header too short");
+
+        let revision = le_u32(header, 8)?;
+        let header_size = le_u32(header, 12)?;
+        let current_lba = le_u64(header, 24)?;
+        let backup_lba = le_u64(header, 32)?;
+        let first_usable_lba = le_u64(header, 40)?;
+        let last_usable_lba = le_u64(header, 48)?;
+        let disk_guid = format_guid(&header[56..72]);
+        let partition_entries_lba = le_u64(header, 72)?;
+        let partition_entry_count = le_u32(header, 80)?;
+        let partition_entry_size = le_u32(header, 84)?;
+        let entry_size = usize::try_from(partition_entry_size)
+            .context("partition entry size does not fit in usize")?;
+        ensure!(
+            entry_size >= 128,
+            "unsupported GPT entry size: {entry_size}"
+        );
+        ensure!(
+            partition_entries_lba >= current_lba,
+            "partition entries precede GPT header"
+        );
+
+        let entries_offset = header_offset
+            .checked_add(
+                usize::try_from(partition_entries_lba - current_lba)
+                    .context("partition entries relative LBA does not fit in usize")?
+                    .checked_mul(512)
+                    .context("partition entries offset overflow")?,
+            )
+            .context("partition entries offset overflow")?;
+
+        Ok(Self {
+            header_offset,
+            header_size,
+            revision,
+            current_lba,
+            backup_lba,
+            first_usable_lba,
+            last_usable_lba,
+            disk_guid,
+            partition_entries_lba,
+            partition_entry_count,
+            entry_size,
+            entries_offset,
+        })
+    }
+}
+
+struct GptPartition {
+    index: u32,
+    type_guid: String,
+    unique_guid: String,
+    first_lba: u64,
+    last_lba: u64,
+    attrs: u64,
+    name: String,
 }
 
 fn round_up_to_chunk(size: usize, chunk_size: usize) -> usize {
@@ -1875,104 +2500,55 @@ fn print_phone_info_subblocks(response: &[u8]) {
 }
 
 fn print_gpt(gpt: &[u8]) -> Result<()> {
-    ensure!(
-        gpt.len() >= 0x600,
-        "GPT payload too short: {} bytes",
-        gpt.len()
-    );
-
-    let header_offset = 0x200;
-    let header = gpt
-        .get(header_offset..)
-        .context("GPT payload missing primary header")?;
-
-    ensure!(header.len() >= 92, "GPT header too short");
-    ensure!(&header[..8] == b"EFI PART", "missing GPT header signature");
-
-    let revision = le_u32(header, 8)?;
-    let header_size = le_u32(header, 12)?;
-    let current_lba = le_u64(header, 24)?;
-    let backup_lba = le_u64(header, 32)?;
-    let first_usable_lba = le_u64(header, 40)?;
-    let last_usable_lba = le_u64(header, 48)?;
-    let disk_guid = format_guid(&header[56..72]);
-    let partition_entries_lba = le_u64(header, 72)?;
-    let partition_entry_count = le_u32(header, 80)?;
-    let partition_entry_size = le_u32(header, 84)?;
+    let layout = GptLayout::parse(gpt)?;
+    let parsed = ParsedGpt::parse(gpt)?;
 
     println!("GPT header");
-    println!("  revision: 0x{revision:08x}");
-    println!("  header size: {header_size}");
-    println!("  current lba: {current_lba}");
-    println!("  backup lba: {backup_lba}");
-    println!("  first usable lba: {first_usable_lba}");
-    println!("  last usable lba: {last_usable_lba}");
-    println!("  disk guid: {disk_guid}");
-    println!("  partition entries lba: {partition_entries_lba}");
-    println!("  partition entry count: {partition_entry_count}");
-    println!("  partition entry size: {partition_entry_size}");
-
-    let entries_offset = usize::try_from(partition_entries_lba)
-        .context("partition entries LBA does not fit in usize")?
-        .checked_mul(512)
-        .context("partition entries offset overflow")?;
-    let entry_size = usize::try_from(partition_entry_size)
-        .context("partition entry size does not fit in usize")?;
-    ensure!(
-        entry_size >= 128,
-        "unsupported GPT entry size: {entry_size}"
-    );
+    println!("  header offset: {}", layout.header_offset);
+    println!("  revision: 0x{:08x}", layout.revision);
+    println!("  header size: {}", layout.header_size);
+    println!("  current lba: {}", layout.current_lba);
+    println!("  backup lba: {}", layout.backup_lba);
+    println!("  first usable lba: {}", layout.first_usable_lba);
+    println!("  last usable lba: {}", layout.last_usable_lba);
+    println!("  disk guid: {}", layout.disk_guid);
+    println!("  partition entries lba: {}", layout.partition_entries_lba);
+    println!("  partition entry count: {}", layout.partition_entry_count);
+    println!("  partition entry size: {}", layout.entry_size);
 
     println!();
     println!("Partitions");
 
-    let mut printed = 0usize;
-    for index in 0..partition_entry_count {
-        let offset = entries_offset
-            .checked_add(
-                usize::try_from(index)
-                    .context("partition index does not fit in usize")?
-                    .checked_mul(entry_size)
-                    .context("partition entry offset overflow")?,
-            )
-            .context("partition entry offset overflow")?;
-        let entry = match gpt.get(offset..offset + entry_size) {
-            Some(entry) => entry,
-            None => break,
-        };
-
-        if entry[..16].iter().all(|byte| *byte == 0) {
-            continue;
-        }
-
-        let type_guid = format_guid(&entry[0..16]);
-        let unique_guid = format_guid(&entry[16..32]);
-        let first_lba = le_u64(entry, 32)?;
-        let last_lba = le_u64(entry, 40)?;
-        let attrs = le_u64(entry, 48)?;
-        let name = decode_utf16_name(&entry[56..128]);
-        let sectors = last_lba.saturating_sub(first_lba).saturating_add(1);
+    for partition in &parsed.partitions {
+        let sectors = partition
+            .last_lba
+            .saturating_sub(partition.first_lba)
+            .saturating_add(1);
 
         println!(
             "  {:>3}: {:<36} first={} last={} sectors={} attrs=0x{:016x}",
-            index + 1,
-            name,
-            first_lba,
-            last_lba,
+            partition.index,
+            partition.name,
+            partition.first_lba,
+            partition.last_lba,
             sectors,
-            attrs
+            partition.attrs
         );
-        println!("       type:   {type_guid}");
-        println!("       unique: {unique_guid}");
-
-        printed += 1;
+        println!("       type:   {}", partition.type_guid);
+        println!("       unique: {}", partition.unique_guid);
     }
 
-    if printed == 0 {
+    if parsed.partitions.is_empty() {
         println!("  no populated partition entries found");
     }
 
     Ok(())
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn le_u32(bytes: &[u8], offset: usize) -> Result<u32> {
@@ -1980,6 +2556,13 @@ fn le_u32(bytes: &[u8], offset: usize) -> Result<u32> {
         .get(offset..offset + 4)
         .with_context(|| format!("missing u32 at offset {offset}"))?;
     Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+fn le_u16(bytes: &[u8], offset: usize) -> Result<u16> {
+    let bytes = bytes
+        .get(offset..offset + 2)
+        .with_context(|| format!("missing u16 at offset {offset}"))?;
+    Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
 }
 
 fn le_u64(bytes: &[u8], offset: usize) -> Result<u64> {
@@ -2027,6 +2610,17 @@ fn parse_u16(value: &str) -> Result<u16, String> {
     }
 }
 
+fn parse_u32(value: &str) -> Result<u32, String> {
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex, 16).map_err(|err| err.to_string())
+    } else {
+        value.parse::<u32>().map_err(|err| err.to_string())
+    }
+}
+
 fn app_type_name(app: u8) -> &'static str {
     match app {
         1 => "BootManager",
@@ -2042,6 +2636,26 @@ fn hex_dump(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn hex_dump_compact(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+fn parse_hex_bytes(value: &str) -> Result<Vec<u8>> {
+    let value = value.trim();
+    ensure!(value.len().is_multiple_of(2), "hex string has odd length");
+
+    (0..value.len())
+        .step_by(2)
+        .map(|index| {
+            u8::from_str_radix(&value[index..index + 2], 16)
+                .with_context(|| format!("invalid hex byte at offset {index}"))
+        })
+        .collect()
 }
 
 fn ascii_dump(bytes: &[u8]) -> String {
