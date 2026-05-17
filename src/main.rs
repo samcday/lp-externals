@@ -1,12 +1,12 @@
 use std::{
     fmt, fs,
-    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
+use gosh_dl::{DownloadEngine, DownloadEvent, DownloadOptions, EngineConfig};
 use rusb::{Device, DeviceHandle, Direction, GlobalContext, TransferType, UsbContext};
 use serde::Deserialize;
 
@@ -23,6 +23,10 @@ struct Cli {
     /// Wait for the target USB device to appear before running the command.
     #[arg(long, global = true, default_value_t = true, action = clap::ArgAction::Set)]
     wait: bool,
+
+    /// Print raw protocol response bytes for decoded commands.
+    #[arg(long, global = true)]
+    debug: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -272,7 +276,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Identify { vid, pid } => identify(vid, pid, cli.wait),
+        Command::Identify { vid, pid } => identify(vid, pid, cli.wait, cli.debug),
         Command::Raw { vid, pid, commands } => raw(vid, pid, cli.wait, &commands),
         Command::StayAwake { vid, pid } => stay_awake(vid, pid, cli.wait),
         Command::Reset { vid, pid } => reset(vid, pid, cli.wait),
@@ -281,10 +285,14 @@ fn main() -> Result<()> {
             SwitchCommand::PhoneInfo { vid, pid } => switch_phone_info(vid, pid, cli.wait),
         },
         Command::Param { command } => match command {
-            ParamCommand::Read { vid, pid, name } => param_read(vid, pid, cli.wait, &name),
+            ParamCommand::Read { vid, pid, name } => {
+                param_read(vid, pid, cli.wait, cli.debug, &name)
+            }
         },
         Command::PhoneInfo { command } => match command {
-            PhoneInfoCommand::Read { vid, pid, name } => phone_info_read(vid, pid, cli.wait, &name),
+            PhoneInfoCommand::Read { vid, pid, name } => {
+                phone_info_read(vid, pid, cli.wait, cli.debug, &name)
+            }
         },
         Command::Gpt { command } => match command {
             GptCommand::Dump { vid, pid, format } => gpt_dump(vid, pid, cli.wait, format),
@@ -406,7 +414,6 @@ fn lumiadb_check(model: &str, product_code: Option<&str>) -> Result<()> {
 fn lumiadb_download(model: &str, product_code: Option<&str>, output: &PathBuf) -> Result<()> {
     let database = fetch_lumiadb_database()?;
     let plan = make_lumiadb_plan(&database, model, product_code)?;
-    let client = http_client()?;
     let target_dir = output
         .join(&plan.device.hardware_model)
         .join(&plan.firmware.product_code);
@@ -418,9 +425,10 @@ fn lumiadb_download(model: &str, product_code: Option<&str>, output: &PathBuf) -
     println!();
     println!("download directory: {}", target_dir.display());
 
+    let runtime = tokio::runtime::Runtime::new().context("failed to create download runtime")?;
     for blob in plan.blobs() {
         let path = target_dir.join(blob.filename);
-        download_file(&client, &blob.url, &path)?;
+        runtime.block_on(download_file(&blob.url, &path))?;
     }
 
     let manifest = plan.manifest_json();
@@ -430,11 +438,11 @@ fn lumiadb_download(model: &str, product_code: Option<&str>, output: &PathBuf) -
     Ok(())
 }
 
-fn identify(vid: u16, pid: u16, wait: bool) -> Result<()> {
+fn identify(vid: u16, pid: u16, wait: bool, debug: bool) -> Result<()> {
     let response = with_device(vid, pid, wait, |handle, endpoints| {
         send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")
     })?;
-    print_identification(&response);
+    print_identification(&response, debug);
 
     Ok(())
 }
@@ -515,7 +523,7 @@ fn switch_phone_info(vid: u16, pid: u16, wait: bool) -> Result<()> {
     Ok(())
 }
 
-fn param_read(vid: u16, pid: u16, wait: bool, name: &str) -> Result<()> {
+fn param_read(vid: u16, pid: u16, wait: bool, debug: bool, name: &str) -> Result<()> {
     ensure!(
         name.len() <= 4,
         "parameter name must be at most 4 ASCII bytes"
@@ -529,9 +537,16 @@ fn param_read(vid: u16, pid: u16, wait: bool, name: &str) -> Result<()> {
 
     let value = parse_param_response(&response)?;
 
+    if debug {
+        print_raw_response(&response);
+    }
+
     println!("param: {name}");
     println!("length: {} bytes", value.len());
-    println!("hex: {}", hex_dump(value));
+
+    if debug {
+        println!("hex: {}", hex_dump(value));
+    }
 
     if let Some(text) = ascii_param_value(value) {
         println!("ascii: {text}");
@@ -542,7 +557,7 @@ fn param_read(vid: u16, pid: u16, wait: bool, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn phone_info_read(vid: u16, pid: u16, wait: bool, name: &str) -> Result<()> {
+fn phone_info_read(vid: u16, pid: u16, wait: bool, debug: bool, name: &str) -> Result<()> {
     ensure!(
         name.len() <= 4,
         "variable name must be at most 4 ASCII bytes"
@@ -551,14 +566,24 @@ fn phone_info_read(vid: u16, pid: u16, wait: bool, name: &str) -> Result<()> {
 
     let request = make_phone_info_read_request(name);
     let response = with_device(vid, pid, wait, |handle, endpoints| {
+        let identification =
+            send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")?;
+        ensure_active_app(&identification, 3, "PhoneInfoApp", "phone-info read")?;
         send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, &request)
     })?;
 
     let value = parse_phone_info_response(&response)?;
 
+    if debug {
+        print_raw_response(&response);
+    }
+
     println!("variable: {name}");
     println!("length: {} bytes", value.len());
-    println!("hex: {}", hex_dump(value));
+
+    if debug {
+        println!("hex: {}", hex_dump(value));
+    }
 
     if let Some(text) = ascii_param_value(value) {
         println!("ascii: {text}");
@@ -842,6 +867,45 @@ fn parse_phone_info_response(response: &[u8]) -> Result<&[u8]> {
     Ok(&response[value_offset..value_end])
 }
 
+fn ensure_active_app(
+    response: &[u8],
+    expected_app: u8,
+    expected_name: &str,
+    command_name: &str,
+) -> Result<()> {
+    let app = parse_nokv_app_type(response)
+        .with_context(|| format!("failed to identify active app before running {command_name}"))?;
+
+    ensure!(
+        app == expected_app,
+        "{command_name} requires {expected_name}, but NOKV reports app type {} ({}). Run `lp-externals switch phone-info`, wait for USB re-enumeration, then retry.",
+        app,
+        app_type_name(app)
+    );
+
+    Ok(())
+}
+
+fn parse_nokv_app_type(response: &[u8]) -> Result<u8> {
+    ensure!(
+        response.len() >= 6,
+        "NOKV response too short: {} bytes",
+        response.len()
+    );
+
+    if &response[..4] == b"NOKU" {
+        bail!("device reported NOKV as unsupported");
+    }
+
+    ensure!(
+        &response[..4] == b"NOKV",
+        "unexpected NOKV response signature: {}",
+        ascii_dump(&response[..response.len().min(4)])
+    );
+
+    Ok(response[5])
+}
+
 fn ascii_param_value(value: &[u8]) -> Option<String> {
     if value.is_empty() {
         return None;
@@ -1015,26 +1079,80 @@ fn http_client() -> Result<reqwest::blocking::Client> {
         .context("failed to build HTTP client")
 }
 
-fn download_file(client: &reqwest::blocking::Client, url: &str, path: &PathBuf) -> Result<()> {
+async fn download_file(url: &str, path: &Path) -> Result<()> {
     if path.exists() {
         println!("exists: {}", path.display());
         return Ok(());
     }
 
     println!("downloading: {url}");
-    let mut response = client
-        .get(url)
-        .send()
-        .with_context(|| format!("download failed for {url}"))?
-        .error_for_status()
-        .with_context(|| format!("download request failed for {url}"))?;
-    let mut file =
-        fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
-    let bytes = response
-        .copy_to(&mut file)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    file.flush()
-        .with_context(|| format!("failed to flush {}", path.display()))?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("invalid download path: {}", path.display()))?;
+    let save_dir = path
+        .parent()
+        .ok_or_else(|| anyhow!("download path has no parent: {}", path.display()))?;
+
+    let config = EngineConfig {
+        download_dir: save_dir.to_path_buf(),
+        max_connections_per_download: 8,
+        user_agent: "lp-externals/0.1".to_string(),
+        ..Default::default()
+    };
+    let engine = DownloadEngine::new(config)
+        .await
+        .with_context(|| format!("failed to initialize downloader for {url}"))?;
+    let mut events = engine.subscribe();
+    let id = engine
+        .add_http(
+            url,
+            DownloadOptions::default()
+                .save_dir(save_dir)
+                .filename(filename)
+                .user_agent("lp-externals/0.1")
+                .max_connections(8),
+        )
+        .await
+        .with_context(|| format!("failed to queue download for {url}"))?;
+
+    let mut last_percent = None;
+    while let Ok(event) = events.recv().await {
+        match event {
+            DownloadEvent::Progress {
+                id: event_id,
+                progress,
+            } if event_id == id => {
+                let percent = progress.percentage().floor() as u64;
+                if last_percent != Some(percent) {
+                    last_percent = Some(percent);
+                    let total = progress
+                        .total_size
+                        .map(|size| size.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    println!("  {percent}% ({}/{} bytes)", progress.completed_size, total);
+                }
+            }
+            DownloadEvent::Completed { id: event_id } if event_id == id => break,
+            DownloadEvent::Failed {
+                id: event_id,
+                error,
+                ..
+            } if event_id == id => {
+                bail!("download failed for {url}: {error}");
+            }
+            _ => {}
+        }
+    }
+
+    engine
+        .shutdown()
+        .await
+        .with_context(|| format!("failed to shut down downloader for {url}"))?;
+    let bytes = path
+        .metadata()
+        .with_context(|| format!("download did not create {}", path.display()))?
+        .len();
     println!("wrote: {} ({} bytes)", path.display(), bytes);
 
     Ok(())
@@ -1289,8 +1407,10 @@ fn print_lumiadb_plan(plan: &LumiaDbPlan<'_>) {
     println!("sbl3: {}", plan.sbl3_url);
 }
 
-fn print_identification(response: &[u8]) {
-    print_raw_response(response);
+fn print_identification(response: &[u8], debug: bool) {
+    if debug {
+        print_raw_response(response);
+    }
 
     if response.len() < 6 {
         println!("response too short to decode NOKV app type");
