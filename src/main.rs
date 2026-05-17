@@ -5,11 +5,16 @@ use clap::{Parser, Subcommand, ValueEnum};
 use rusb::{Device, DeviceHandle, Direction, GlobalContext, TransferType, UsbContext};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
+const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Parser)]
 #[command(name = "lp-externals")]
 #[command(about = "LPexternals: portable Lumia/Nokia phone pokery")]
 struct Cli {
+    /// Wait for the target USB device to appear before running the command.
+    #[arg(long, global = true, default_value_t = true, action = clap::ArgAction::Set)]
+    wait: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -174,27 +179,27 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Identify { vid, pid } => identify(vid, pid),
-        Command::Raw { vid, pid, commands } => raw(vid, pid, &commands),
-        Command::Reset { vid, pid } => reset(vid, pid),
+        Command::Identify { vid, pid } => identify(vid, pid, cli.wait),
+        Command::Raw { vid, pid, commands } => raw(vid, pid, cli.wait, &commands),
+        Command::Reset { vid, pid } => reset(vid, pid, cli.wait),
         Command::Switch { command } => match command {
-            SwitchCommand::Flash { vid, pid } => switch_flash(vid, pid),
-            SwitchCommand::PhoneInfo { vid, pid } => switch_phone_info(vid, pid),
+            SwitchCommand::Flash { vid, pid } => switch_flash(vid, pid, cli.wait),
+            SwitchCommand::PhoneInfo { vid, pid } => switch_phone_info(vid, pid, cli.wait),
         },
         Command::Param { command } => match command {
-            ParamCommand::Read { vid, pid, name } => param_read(vid, pid, &name),
+            ParamCommand::Read { vid, pid, name } => param_read(vid, pid, cli.wait, &name),
         },
         Command::PhoneInfo { command } => match command {
-            PhoneInfoCommand::Read { vid, pid, name } => phone_info_read(vid, pid, &name),
+            PhoneInfoCommand::Read { vid, pid, name } => phone_info_read(vid, pid, cli.wait, &name),
         },
         Command::Gpt { command } => match command {
-            GptCommand::Dump { vid, pid, format } => gpt_dump(vid, pid, format),
+            GptCommand::Dump { vid, pid, format } => gpt_dump(vid, pid, cli.wait, format),
         },
     }
 }
 
-fn identify(vid: u16, pid: u16) -> Result<()> {
-    let response = with_device(vid, pid, |handle, endpoints| {
+fn identify(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    let response = with_device(vid, pid, wait, |handle, endpoints| {
         send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")
     })?;
     print_identification(&response);
@@ -202,8 +207,8 @@ fn identify(vid: u16, pid: u16) -> Result<()> {
     Ok(())
 }
 
-fn raw(vid: u16, pid: u16, commands: &[String]) -> Result<()> {
-    let responses = with_device(vid, pid, |handle, endpoints| {
+fn raw(vid: u16, pid: u16, wait: bool, commands: &[String]) -> Result<()> {
+    let responses = with_device(vid, pid, wait, |handle, endpoints| {
         let mut responses = Vec::with_capacity(commands.len());
 
         for command in commands {
@@ -232,8 +237,8 @@ fn raw(vid: u16, pid: u16, commands: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn reset(vid: u16, pid: u16) -> Result<()> {
-    with_device(vid, pid, |handle, endpoints| {
+fn reset(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    with_device(vid, pid, wait, |handle, endpoints| {
         send_raw_void_command(handle, endpoints.out_addr, b"NOKR")
     })?;
 
@@ -242,8 +247,8 @@ fn reset(vid: u16, pid: u16) -> Result<()> {
     Ok(())
 }
 
-fn switch_flash(vid: u16, pid: u16) -> Result<()> {
-    with_device(vid, pid, |handle, endpoints| {
+fn switch_flash(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    with_device(vid, pid, wait, |handle, endpoints| {
         send_raw_void_command(handle, endpoints.out_addr, b"NOKS")
     })?;
 
@@ -252,8 +257,8 @@ fn switch_flash(vid: u16, pid: u16) -> Result<()> {
     Ok(())
 }
 
-fn switch_phone_info(vid: u16, pid: u16) -> Result<()> {
-    with_device(vid, pid, |handle, endpoints| {
+fn switch_phone_info(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    with_device(vid, pid, wait, |handle, endpoints| {
         send_raw_void_command(handle, endpoints.out_addr, b"NOKP")
     })?;
 
@@ -262,7 +267,7 @@ fn switch_phone_info(vid: u16, pid: u16) -> Result<()> {
     Ok(())
 }
 
-fn param_read(vid: u16, pid: u16, name: &str) -> Result<()> {
+fn param_read(vid: u16, pid: u16, wait: bool, name: &str) -> Result<()> {
     ensure!(
         name.len() <= 4,
         "parameter name must be at most 4 ASCII bytes"
@@ -270,7 +275,7 @@ fn param_read(vid: u16, pid: u16, name: &str) -> Result<()> {
     ensure!(name.is_ascii(), "parameter name must be ASCII");
 
     let request = make_read_param_request(name);
-    let response = with_device(vid, pid, |handle, endpoints| {
+    let response = with_device(vid, pid, wait, |handle, endpoints| {
         send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, &request)
     })?;
 
@@ -289,7 +294,7 @@ fn param_read(vid: u16, pid: u16, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn phone_info_read(vid: u16, pid: u16, name: &str) -> Result<()> {
+fn phone_info_read(vid: u16, pid: u16, wait: bool, name: &str) -> Result<()> {
     ensure!(
         name.len() <= 4,
         "variable name must be at most 4 ASCII bytes"
@@ -297,7 +302,7 @@ fn phone_info_read(vid: u16, pid: u16, name: &str) -> Result<()> {
     ensure!(name.is_ascii(), "variable name must be ASCII");
 
     let request = make_phone_info_read_request(name);
-    let response = with_device(vid, pid, |handle, endpoints| {
+    let response = with_device(vid, pid, wait, |handle, endpoints| {
         send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, &request)
     })?;
 
@@ -314,8 +319,8 @@ fn phone_info_read(vid: u16, pid: u16, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn gpt_dump(vid: u16, pid: u16, format: GptDumpFormat) -> Result<()> {
-    let response = with_device(vid, pid, |handle, endpoints| {
+fn gpt_dump(vid: u16, pid: u16, wait: bool, format: GptDumpFormat) -> Result<()> {
+    let response = with_device(vid, pid, wait, |handle, endpoints| {
         send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKT")
     })?;
 
@@ -354,9 +359,10 @@ fn gpt_dump(vid: u16, pid: u16, format: GptDumpFormat) -> Result<()> {
 fn with_device<T>(
     vid: u16,
     pid: u16,
+    wait: bool,
     f: impl FnOnce(&mut DeviceHandle<GlobalContext>, &Endpoints) -> Result<T>,
 ) -> Result<T> {
-    let (device, mut handle) = open_device(vid, pid)?;
+    let (device, mut handle) = open_device(vid, pid, wait)?;
     let endpoints = find_bulk_endpoints(&device)?;
 
     if handle
@@ -386,7 +392,40 @@ fn with_device<T>(
     result
 }
 
-fn open_device(vid: u16, pid: u16) -> Result<(Device<GlobalContext>, DeviceHandle<GlobalContext>)> {
+fn open_device(
+    vid: u16,
+    pid: u16,
+    wait: bool,
+) -> Result<(Device<GlobalContext>, DeviceHandle<GlobalContext>)> {
+    loop {
+        if let Some(device) = find_device(vid, pid)? {
+            let handle = match device.open() {
+                Ok(handle) => handle,
+                Err(err) if wait => {
+                    eprintln!(
+                        "found USB device {vid:04x}:{pid:04x}, but opening failed: {err}; waiting..."
+                    );
+                    std::thread::sleep(DEVICE_POLL_INTERVAL);
+                    continue;
+                }
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("failed to open USB device {vid:04x}:{pid:04x}"));
+                }
+            };
+
+            return Ok((device, handle));
+        }
+
+        if !wait {
+            bail!("USB device {vid:04x}:{pid:04x} not found");
+        }
+
+        std::thread::sleep(DEVICE_POLL_INTERVAL);
+    }
+}
+
+fn find_device(vid: u16, pid: u16) -> Result<Option<Device<GlobalContext>>> {
     let devices = rusb::devices().context("failed to list USB devices")?;
 
     for device in devices.iter() {
@@ -394,14 +433,11 @@ fn open_device(vid: u16, pid: u16) -> Result<(Device<GlobalContext>, DeviceHandl
             .device_descriptor()
             .context("failed to read USB device descriptor")?;
         if descriptor.vendor_id() == vid && descriptor.product_id() == pid {
-            let handle = device
-                .open()
-                .with_context(|| format!("failed to open USB device {vid:04x}:{pid:04x}"))?;
-            return Ok((device, handle));
+            return Ok(Some(device));
         }
     }
 
-    bail!("USB device {vid:04x}:{pid:04x} not found")
+    Ok(None)
 }
 
 fn find_bulk_endpoints<T: UsbContext>(device: &Device<T>) -> Result<Endpoints> {

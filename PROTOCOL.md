@@ -17,6 +17,14 @@ Example:
 cargo run -- raw NOKV
 ```
 
+By default, `lp-externals` waits for the target USB device to appear before opening it. Disable this with `--wait=false` if immediate failure is preferred.
+
+BootMgr has a short reboot/watchdog window. Send `NOKD` soon after enumeration to keep the app alive:
+
+```sh
+cargo run -- raw NOKD
+```
+
 ## Known Commands
 
 | Command | Name in WPinternals | Notes |
@@ -195,6 +203,7 @@ cargo run -- param read DPI
 
 ## Current Quirks
 
+- If `NOKD` is not sent shortly after the USB interface appears, the BootMgr watchdog can bite. The USB device may still appear present, but nothing responds on the bulk endpoints.
 - The first USB transaction after plugging in or after a reboot may time out, especially on the tested AMD USB controller.
 - Subsequent transactions often work reliably.
 - Multi-command raw sessions avoid repeated open/claim/release cycles:
