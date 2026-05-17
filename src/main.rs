@@ -28,6 +28,20 @@ enum Command {
         #[arg(long, default_value_t = NOKIA_BOOTMGR_PRODUCT_ID, value_parser = parse_u16)]
         pid: u16,
     },
+
+    /// Send a raw ASCII command and print the response.
+    Raw {
+        /// USB vendor ID.
+        #[arg(long, default_value_t = NOKIA_VENDOR_ID, value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value_t = NOKIA_BOOTMGR_PRODUCT_ID, value_parser = parse_u16)]
+        pid: u16,
+
+        /// Raw ASCII command, for example NOKI or NOKV.
+        command: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -35,10 +49,39 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Identify { vid, pid } => identify(vid, pid),
+        Command::Raw { vid, pid, command } => raw(vid, pid, &command),
     }
 }
 
 fn identify(vid: u16, pid: u16) -> Result<()> {
+    let response = with_device(vid, pid, |handle, endpoints| {
+        send_raw_command(handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")
+    })?;
+    print_identification(&response);
+
+    Ok(())
+}
+
+fn raw(vid: u16, pid: u16, command: &str) -> Result<()> {
+    let response = with_device(vid, pid, |handle, endpoints| {
+        send_raw_command(
+            handle,
+            endpoints.out_addr,
+            endpoints.in_addr,
+            command.as_bytes(),
+        )
+    })?;
+
+    print_raw_response(&response);
+
+    Ok(())
+}
+
+fn with_device<T>(
+    vid: u16,
+    pid: u16,
+    f: impl FnOnce(&mut DeviceHandle<GlobalContext>, &Endpoints) -> Result<T>,
+) -> Result<T> {
     let (device, mut handle) = open_device(vid, pid)?;
     let endpoints = find_bulk_endpoints(&device)?;
 
@@ -60,14 +103,13 @@ fn identify(vid: u16, pid: u16) -> Result<()> {
         .claim_interface(endpoints.interface)
         .with_context(|| format!("failed to claim interface {}", endpoints.interface))?;
 
-    let response = send_raw_command(&mut handle, endpoints.out_addr, endpoints.in_addr, b"NOKV")?;
-    print_identification(&response);
+    let result = f(&mut handle, &endpoints);
 
     handle
         .release_interface(endpoints.interface)
         .with_context(|| format!("failed to release interface {}", endpoints.interface))?;
 
-    Ok(())
+    result
 }
 
 fn open_device(vid: u16, pid: u16) -> Result<(Device<GlobalContext>, DeviceHandle<GlobalContext>)> {
@@ -151,9 +193,7 @@ fn send_raw_command(
 }
 
 fn print_identification(response: &[u8]) {
-    println!("response length: {} bytes", response.len());
-    println!("response hex: {}", hex_dump(response));
-    println!("response ascii: {}", ascii_dump(response));
+    print_raw_response(response);
 
     if response.len() < 6 {
         println!("response too short to decode NOKV app type");
@@ -183,6 +223,12 @@ fn print_identification(response: &[u8]) {
     if app == 1 {
         print_bootmgr_subblocks(response);
     }
+}
+
+fn print_raw_response(response: &[u8]) {
+    println!("response length: {} bytes", response.len());
+    println!("response hex: {}", hex_dump(response));
+    println!("response ascii: {}", ascii_dump(response));
 }
 
 fn print_bootmgr_subblocks(response: &[u8]) {
