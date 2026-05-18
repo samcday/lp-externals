@@ -218,6 +218,15 @@ pub(crate) fn armprg_write(
     Ok(())
 }
 
+pub(crate) fn armprg_reboot(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    edl::with_device_allow_release_disconnect(vid, pid, wait, |handle, endpoints| {
+        edl::armprg_reboot(handle, endpoints)
+    })?;
+    println!("ARMPRG reboot: sent");
+
+    Ok(())
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
 

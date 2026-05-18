@@ -295,6 +295,19 @@ pub(crate) fn armprg_flash(
     Ok(())
 }
 
+pub(crate) fn armprg_reboot(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &EdlEndpoints,
+) -> Result<()> {
+    let response = send_armprg_command(handle, endpoints, &[0x0b])?;
+    ensure!(
+        response.first() == Some(&0x0c),
+        "unexpected ARMPRG reboot response: {}",
+        hex_dump(&response)
+    );
+    Ok(())
+}
+
 fn send_armprg_command(
     handle: &mut DeviceHandle<GlobalContext>,
     endpoints: &EdlEndpoints,

@@ -357,6 +357,17 @@ enum EdlArmprgCommand {
         #[arg(long)]
         confirm_raw_write: bool,
     },
+
+    /// Reboot from ARMPRG mode.
+    Reboot {
+        /// USB vendor ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_VID, value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
+        pid: u16,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -675,6 +686,9 @@ fn main() -> Result<()> {
                     &file,
                     confirm_raw_write,
                 ),
+                EdlArmprgCommand::Reboot { vid, pid } => {
+                    commands::edl::armprg_reboot(vid, pid, cli.wait)
+                }
             },
         },
     }
