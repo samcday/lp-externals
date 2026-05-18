@@ -217,6 +217,34 @@ pub(crate) fn armprg_hello(
     Ok(())
 }
 
+pub(crate) fn armprg_set_security_mode(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &EdlEndpoints,
+    mode: u8,
+) -> Result<()> {
+    let response = send_armprg_command(handle, endpoints, &[0x17, mode])?;
+    ensure!(
+        response.first() == Some(&0x18),
+        "unexpected ARMPRG set-security response: {}",
+        hex_dump(&response)
+    );
+    Ok(())
+}
+
+pub(crate) fn armprg_open_partition(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &EdlEndpoints,
+    partition: u8,
+) -> Result<()> {
+    let response = send_armprg_command(handle, endpoints, &[0x1b, partition])?;
+    ensure!(
+        response.first() == Some(&0x1c),
+        "unexpected ARMPRG open-partition response: {}",
+        hex_dump(&response)
+    );
+    Ok(())
+}
+
 fn send_armprg_command(
     handle: &mut DeviceHandle<GlobalContext>,
     endpoints: &EdlEndpoints,

@@ -304,6 +304,21 @@ enum EdlArmprgCommand {
         #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
         pid: u16,
     },
+
+    /// Open an ARMPRG raw flash partition.
+    Open {
+        /// USB vendor ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_VID, value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
+        pid: u16,
+
+        /// Raw flash partition ID. Lumia eMMC uses 0x21.
+        #[arg(long, default_value = "0x21", value_parser = parse_u16)]
+        partition: u16,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -598,6 +613,11 @@ fn main() -> Result<()> {
                 EdlArmprgCommand::Hello { vid, pid } => {
                     commands::edl::armprg_hello(vid, pid, cli.wait)
                 }
+                EdlArmprgCommand::Open {
+                    vid,
+                    pid,
+                    partition,
+                } => commands::edl::armprg_open(vid, pid, cli.wait, partition),
             },
         },
     }

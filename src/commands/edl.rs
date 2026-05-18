@@ -146,3 +146,18 @@ pub(crate) fn armprg_hello(vid: u16, pid: u16, wait: bool) -> Result<()> {
 
     Ok(())
 }
+
+pub(crate) fn armprg_open(vid: u16, pid: u16, wait: bool, partition: u16) -> Result<()> {
+    ensure!(
+        partition <= u8::MAX as u16,
+        "ARMPRG partition ID must fit in one byte"
+    );
+    edl::with_device(vid, pid, wait, |handle, endpoints| {
+        edl::armprg_hello(handle, endpoints)?;
+        edl::armprg_set_security_mode(handle, endpoints, 0)?;
+        edl::armprg_open_partition(handle, endpoints, partition as u8)
+    })?;
+    println!("ARMPRG partition 0x{partition:02x}: open");
+
+    Ok(())
+}
