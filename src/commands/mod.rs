@@ -1,3 +1,4 @@
+pub(crate) mod disable_secure_boot;
 pub(crate) mod edl;
 pub(crate) mod factory_reset;
 pub(crate) mod ffu;

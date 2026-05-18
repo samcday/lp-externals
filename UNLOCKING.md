@@ -2,7 +2,7 @@
 
 Target: Lumia 520 / `fame`, a Spec A device in WPinternals terminology.
 
-This project can now prepare and execute the destructive boot-chain flash stage, but it still does not implement the later EFIESP/BCD unlock stage required for a full WPinternals-equivalent jailbreak.
+This project can now prepare and execute the destructive boot-chain flash stage and has guarded Spec A `disable-secure-boot` plumbing for the later EFIESP/BCD/NV stage.
 
 ## Current Device Facts
 
@@ -157,6 +157,19 @@ cargo run -- stock-restore --confirm-imei <IMEI>
 ```
 
 This command identifies the phone through PhoneInfoApp, resolves the exact LumiaDB FFU from `TYPE + CTR`, validates the FFU against FlashApp platform/eMMC/RRKH data, and then streams the signed FFU through `NOKXFS`. This is destructive, but it is not an exploit path and does not write locally patched boot components.
+
+## Final Secure Boot Disable Stage
+
+After the Spec A boot-chain jailbreak has completed and FlashApp reports `platform_secure_boot=false`, `secure_ffu=false`, and `uefi_secure_boot=true`, run:
+
+```sh
+cargo run -- disable-secure-boot --dry-run
+cargo run -- disable-secure-boot --confirm-imei <IMEI>
+```
+
+The dry run resolves the exact stock FFU, downloads the WPinternals donor FFU if the stock `mobilestartup.efi` hash is unsupported, patches EFIESP FAT contents, rebuilds BCD with element `0x16000048 = true`, prepares the Spec A `SBA` NV payload, and prints the raw-sector write plan. The destructive run requires the exact IMEI and writes through FlashApp `NOKF` raw-sector writes.
+
+This initial implementation targets the Spec A / FlashApp v1 path. It fails closed for Spec B instead of guessing.
 
 ## Why Qualcomm Emergency Mode Is Needed
 

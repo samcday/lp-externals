@@ -6,6 +6,7 @@ mod gpt;
 mod jailbreak;
 mod lumiadb;
 mod qcom;
+mod secure_boot;
 mod uefi;
 mod util;
 
@@ -186,6 +187,29 @@ enum Command {
         dry_run: bool,
 
         /// Do not reset the phone after a successful restore.
+        #[arg(long)]
+        no_reset: bool,
+    },
+
+    /// Patch EFIESP/BCD and write Spec A secure-boot-disable NV state after IMEI confirmation.
+    DisableSecureBoot {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
+
+        /// Exact phone IMEI required before writing destructive raw sectors.
+        #[arg(long)]
+        confirm_imei: Option<String>,
+
+        /// Resolve/download/build/validate only; do not write sectors.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Do not reset the phone after successful writes.
         #[arg(long)]
         no_reset: bool,
     },
@@ -623,6 +647,20 @@ fn main() -> Result<()> {
             dry_run,
             no_reset,
         } => commands::stock_restore::run(
+            vid,
+            pid,
+            cli.wait,
+            confirm_imei.as_deref(),
+            dry_run,
+            no_reset,
+        ),
+        Command::DisableSecureBoot {
+            vid,
+            pid,
+            confirm_imei,
+            dry_run,
+            no_reset,
+        } => commands::disable_secure_boot::run(
             vid,
             pid,
             cli.wait,

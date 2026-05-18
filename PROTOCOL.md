@@ -36,6 +36,7 @@ cargo run -- stay-awake
 | `NOKS` | `RebootToFlashAppSignature` | Switch/reboot to FlashApp mode. Mode-changing. Used by `switch flash`. |
 | `NOKP` | `RebootToPhoneInfoAppSignature` | Switch/reboot to PhoneInfoApp mode. Mode-changing. Used by `switch phone-info`. |
 | `NOKG` | `FactoryResetSignature` | FlashApp factory reset. Destructive. Used by `factory-reset` after IMEI confirmation. WPinternals notes that it erases `MODEM_FS1` and `MODEM_FS2`, then restores `MODEM_FSG` to `MODEM_FS1`. This is not a full stock FFU restore. |
+| `NOKF` | `FlashSignature` / `FlashSectors()` | FlashApp raw sector write. Destructive. Used by `disable-secure-boot` only after IMEI confirmation and post-jailbreak preflight. |
 | `NOKR` | `RebootSignature` | Reboot. WPinternals sends this as write-only and does not wait for a response. Used by `reset`. |
 | `NOKA` | `ContinueBootSignature` | Continue normal boot where supported. |
 | `NOKM` | `RebootToMassStorageSignature` | Switch/reboot to mass storage where supported. Mode-changing. |
@@ -243,6 +244,24 @@ cargo run -- stock-restore --confirm-imei 123456789012345
 ```
 
 The Lumia FlashApp path follows WPinternals' stock FFU behavior: send the complete signed FFU header with secure FFU header subblock `0x0b`, then stream payload data with sync v2 subblock `0x1b` when reported by FlashApp, or sync v1 subblock `0x0c` otherwise. This is distinct from the unlock/exploit path because FlashApp remains in its signed FFU validation flow.
+
+## Raw Flash Writes
+
+WPinternals `FlashSectors()` uses `NOKF` after the boot-chain jailbreak has disabled the normal secure FFU gates:
+
+```text
+offset  size  value
+0x00    4     "NOKF"
+0x05    1     target device, `0` for eMMC
+0x0b    4     big-endian start sector
+0x0f    4     big-endian sector count
+0x13    1     progress percentage
+0x18    1     verify flag, currently `0`
+0x19    1     test flag, currently `0`
+0x40    n     sector-aligned payload
+```
+
+`disable-secure-boot` uses this only for the final Spec A NV/GPT/EFIESP stage and keeps the exact `--confirm-imei` destructive guard.
 
 ## Soft Brick
 

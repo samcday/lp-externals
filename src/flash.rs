@@ -18,6 +18,7 @@ use crate::{
 };
 
 const SECURE_FLASH_SIGNATURE: &[u8; 6] = b"NOKXFS";
+const RAW_FLASH_SIGNATURE: &[u8; 4] = b"NOKF";
 const PROTOCOL_SYNC_V1: u16 = 1;
 const PROTOCOL_SYNC_V2: u16 = 4;
 const SUBBLOCK_FFU_HEADER_V1: u32 = 0x0000000b;
@@ -145,6 +146,56 @@ pub(crate) fn soft_brick_with_ffu(
     );
     send_ffu_payload_v1(handle, endpoints, &payload, 0, 0)
         .context("failed to send zero FFU payload chunk")
+}
+
+pub(crate) fn flash_raw_sectors(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &Endpoints,
+    start_sector: u32,
+    data: &[u8],
+    progress: u8,
+) -> Result<()> {
+    ensure!(!data.is_empty(), "raw FlashApp write payload is empty");
+    ensure!(
+        data.len().is_multiple_of(0x200),
+        "raw FlashApp write payload is not sector-aligned"
+    );
+    let sector_count = u32::try_from(data.len() / 0x200).context("sector count overflow")?;
+    let mut request = vec![0; data.len() + 0x40];
+    request[..4].copy_from_slice(RAW_FLASH_SIGNATURE);
+    request[0x05] = 0;
+    request[0x0b..0x0f].copy_from_slice(&start_sector.to_be_bytes());
+    request[0x0f..0x13].copy_from_slice(&sector_count.to_be_bytes());
+    request[0x13] = progress.min(100);
+    request[0x18] = 0;
+    request[0x19] = 0;
+    request[0x40..].copy_from_slice(data);
+
+    let written = handle
+        .write_bulk(endpoints.out_addr, &request, FLASH_TIMEOUT)
+        .with_context(|| {
+            format!(
+                "failed to write to bulk OUT endpoint 0x{:02x}",
+                endpoints.out_addr
+            )
+        })?;
+    ensure!(
+        written == request.len(),
+        "short USB write: wrote {written} of {} bytes",
+        request.len()
+    );
+
+    let mut response = vec![0; 0x8000];
+    let read = handle
+        .read_bulk(endpoints.in_addr, &mut response, FLASH_TIMEOUT)
+        .with_context(|| {
+            format!(
+                "failed to read from bulk IN endpoint 0x{:02x}",
+                endpoints.in_addr
+            )
+        })?;
+    response.truncate(read);
+    validate_raw_flash_response(&response)
 }
 
 pub(crate) fn validate_ffu_against_flash_app(ffu: &FfuMetadata, info: &FlashAppInfo) -> Result<()> {
@@ -423,6 +474,35 @@ fn validate_secure_flash_response(response: &[u8]) -> Result<()> {
         bail!(
             "secure FFU failed with status 0x{status:04x}: {}",
             flash_error_message(status)
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_raw_flash_response(response: &[u8]) -> Result<()> {
+    ensure!(
+        response.len() >= 4,
+        "raw flash response too short: {} bytes",
+        response.len()
+    );
+
+    if &response[..4] == b"NOKU" {
+        bail!("device reported NOKF as unsupported");
+    }
+
+    ensure!(
+        response.get(..4) == Some(RAW_FLASH_SIGNATURE.as_slice()),
+        "unexpected raw flash response signature: {}",
+        ascii_dump(&response[..response.len().min(4)])
+    );
+
+    if response.len() >= 8 {
+        let status = u16::from_be_bytes([response[6], response[7]]);
+        ensure!(
+            status == 0,
+            "raw flash write failed with status 0x{status:04x}: {}",
+            hex_dump(response)
         );
     }
 

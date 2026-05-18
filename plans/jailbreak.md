@@ -122,17 +122,17 @@ lp-externals soft-brick --ffu <stock.ffu> --confirm-imei <IMEI>
 
 It must not perform LumiaDB lookup, emergency-loader validation, GPT patching, SBL patching, UEFI patching, or EDL protocol work.
 
-## Later EFIESP Stage
+## EFIESP Stage
 
-Full WPinternals-equivalent jailbreak also needs the EFIESP/UEFI unlock stage:
+Full WPinternals-equivalent jailbreak also needs the EFIESP/UEFI unlock stage. Initial Spec A plumbing is implemented as `disable-secure-boot`:
 
 1. Patch `EFIESP` FAT contents, especially `mobilestartup.efi`.
 2. Use donor/supported FFU `mobilestartup.efi` if the stock FFU version is unsupported.
 3. Edit BCD to set the no-integrity/test-signing element.
-4. Handle `BACKUP_BS_NV`, `UEFI_BS_NV`, `BACKUP_EFIESP`, and unlock marker partition layout.
-5. Flash EFIESP/NV/GPT changes through the now-unlocked FlashApp path.
+4. Split `UEFI_BS_NV` into `BACKUP_BS_NV` plus a new `UEFI_BS_NV` when needed.
+5. Flash the `SBA` NV payload, changed GPT, and WPinternals-style split EFIESP payload through FlashApp `NOKF`.
 
-The current stock RM-914 FFU is Windows Phone 8.1, while WPinternals `SecureBootHack-V1.1-EFIESP` targets Windows 10 Mobile `mobilestartup.efi` versions. That donor requirement must be resolved before claiming full jailbreak completion.
+The current stock RM-914 FFU is Windows Phone 8.1, while WPinternals `SecureBootHack-V1.1-EFIESP` targets Windows 10 Mobile `mobilestartup.efi` versions. The implementation uses the LumiaDB RM-1085 donor FFU when the stock hash is unsupported.
 
 ## Failure Policy
 

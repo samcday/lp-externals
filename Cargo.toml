@@ -8,12 +8,17 @@ license = "GPL-3.0-only"
 anyhow = "1.0.98"
 clap = { version = "4.5.38", features = ["derive"] }
 crc32fast = "1.4.2"
+flate2 = "1.1.9"
 gosh-dl = { version = "0.4.0", default-features = false, features = ["http"] }
+hadris-fat = "1.1.2"
 lzma-rs = "0.3.0"
+regf = "0.1.0"
 reqwest = { version = "0.12.23", features = ["blocking", "json", "stream"] }
+roxmltree = "0.21.1"
 rusb = "0.9.4"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+sha1 = "0.11.0"
 sha2 = "0.10.9"
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros", "time"] }
 xz2 = "0.1.7"

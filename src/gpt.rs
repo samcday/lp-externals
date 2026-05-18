@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail, ensure};
+use sha2::{Digest, Sha256};
 
 use crate::util::{
     decode_utf16_name, find_bytes, format_guid, le_u32, le_u64, write_le_u32, write_le_u64,
@@ -129,6 +130,7 @@ impl GptLayout {
     }
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct GptPartition {
     pub(crate) index: u32,
     pub(crate) type_guid: String,
@@ -185,6 +187,99 @@ pub(crate) fn insert_spec_a_hack(gpt: &[u8]) -> Result<Vec<u8>> {
     Ok(patched)
 }
 
+pub(crate) struct SecureBootNvUpdate {
+    pub(crate) gpt: Vec<u8>,
+    pub(crate) gpt_changed: bool,
+    pub(crate) uefi_bs_nv: GptPartition,
+}
+
+pub(crate) fn prepare_spec_a_secure_boot_nv(gpt: &[u8]) -> Result<SecureBootNvUpdate> {
+    let layout = GptLayout::parse(gpt)?;
+    let mut patched = gpt.to_vec();
+
+    if find_partition_entry_offset(&layout, &patched, "BACKUP_BS_NV")?.is_some() {
+        let parsed = ParsedGpt::parse(&patched)?;
+        let uefi_bs_nv = parsed
+            .partition("UEFI_BS_NV")
+            .context("GPT contains BACKUP_BS_NV but no UEFI_BS_NV")?
+            .clone();
+        return Ok(SecureBootNvUpdate {
+            gpt: patched,
+            gpt_changed: false,
+            uefi_bs_nv,
+        });
+    }
+
+    let backup_offset = find_partition_entry_offset(&layout, &patched, "UEFI_BS_NV")?
+        .context("GPT does not contain UEFI_BS_NV")?;
+    let new_offset = find_empty_entry_offset(&layout, &patched)?
+        .context("GPT has no empty partition entry for UEFI_BS_NV split")?;
+    let backup_first = le_u64(&patched, backup_offset + 32)?;
+    let backup_last = le_u64(&patched, backup_offset + 40)?;
+    ensure!(
+        backup_last >= backup_first,
+        "UEFI_BS_NV partition has an invalid sector range"
+    );
+
+    let original_type_guid = patched[backup_offset..backup_offset + 16].to_vec();
+    let original_unique_guid = patched[backup_offset + 16..backup_offset + 32].to_vec();
+    let original_attrs = le_u64(&patched, backup_offset + 48)?;
+    let new_first = backup_last
+        .checked_add(1)
+        .context("UEFI_BS_NV split start sector overflow")?;
+    let new_last = new_first
+        .checked_add(backup_last - backup_first)
+        .context("UEFI_BS_NV split end sector overflow")?;
+    ensure!(
+        new_last <= layout.last_usable_lba,
+        "UEFI_BS_NV split would exceed GPT last usable LBA"
+    );
+    let original_partitions = ParsedGpt::parse(&patched)?;
+    for partition in &original_partitions.partitions {
+        if partition.name.eq_ignore_ascii_case("UEFI_BS_NV") {
+            continue;
+        }
+        ensure!(
+            !ranges_overlap(new_first, new_last, partition.first_lba, partition.last_lba),
+            "UEFI_BS_NV split would overlap partition {} ({}..={})",
+            partition.name,
+            partition.first_lba,
+            partition.last_lba
+        );
+    }
+
+    patched[backup_offset..backup_offset + 16]
+        .copy_from_slice(&random_guid_bytes(gpt, b"BACKUP_BS_NV_TYPE"));
+    patched[backup_offset + 16..backup_offset + 32]
+        .copy_from_slice(&random_guid_bytes(gpt, b"BACKUP_BS_NV_UNIQUE"));
+    write_utf16_name(
+        &mut patched[backup_offset + 56..backup_offset + 128],
+        "BACKUP_BS_NV",
+    );
+
+    let mut uefi_entry = vec![0; layout.entry_size];
+    uefi_entry[0..16].copy_from_slice(&original_type_guid);
+    uefi_entry[16..32].copy_from_slice(&original_unique_guid);
+    write_le_u64(&mut uefi_entry, 32, new_first)?;
+    write_le_u64(&mut uefi_entry, 40, new_last)?;
+    write_le_u64(&mut uefi_entry, 48, original_attrs)?;
+    write_utf16_name(&mut uefi_entry[56..128], "UEFI_BS_NV");
+    patched[new_offset..new_offset + layout.entry_size].copy_from_slice(&uefi_entry);
+
+    rebuild_primary_gpt_crc(&layout, &mut patched)?;
+    let parsed = ParsedGpt::parse(&patched)?;
+    let uefi_bs_nv = parsed
+        .partition("UEFI_BS_NV")
+        .context("patched GPT does not contain UEFI_BS_NV")?
+        .clone();
+
+    Ok(SecureBootNvUpdate {
+        gpt: patched,
+        gpt_changed: true,
+        uefi_bs_nv,
+    })
+}
+
 fn find_partition_entry_offset(
     layout: &GptLayout,
     gpt: &[u8],
@@ -238,6 +333,30 @@ fn write_utf16_name(target: &mut [u8], name: &str) {
     for (index, word) in name.encode_utf16().take(target.len() / 2).enumerate() {
         target[index * 2..index * 2 + 2].copy_from_slice(&word.to_le_bytes());
     }
+}
+
+fn ranges_overlap(a_first: u64, a_last: u64, b_first: u64, b_last: u64) -> bool {
+    a_first <= b_last && b_first <= a_last
+}
+
+fn random_guid_bytes(seed: &[u8], label: &[u8]) -> [u8; 16] {
+    let mut hasher = Sha256::new();
+    hasher.update(seed);
+    hasher.update(label);
+    hasher.update(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_le_bytes(),
+    );
+    hasher.update(std::process::id().to_le_bytes());
+    let digest = hasher.finalize();
+    let mut guid = [0; 16];
+    guid.copy_from_slice(&digest[..16]);
+    guid[7] = (guid[7] & 0x0f) | 0x40;
+    guid[8] = (guid[8] & 0x3f) | 0x80;
+    guid
 }
 
 fn rebuild_primary_gpt_crc(layout: &GptLayout, gpt: &mut [u8]) -> Result<()> {

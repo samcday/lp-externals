@@ -10,6 +10,10 @@ use serde::Deserialize;
 const LUMIADB_DATABASE_URL: &str = "https://lumiadb.com/database.json";
 const LUMIADB_API_BASE: &str = "https://api.lumiadb.com";
 const LUMIA_520_SBL3: &str = "Engineering-SBL3-Lumia-520-620-625-720-1320.bin";
+pub(crate) const DONOR_MODEL: &str = "RM-1085";
+pub(crate) const DONOR_PRODUCT_CODE: &str = "059X4T0";
+pub(crate) const DONOR_FFU_FILENAME: &str =
+    "RM1085_1078.0053.10586.13169.12742.034EE8_retail_prod_signed.ffu";
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct LumiaDbDevice {
@@ -356,6 +360,17 @@ pub(crate) fn cached_sbl3_path(plan: &LumiaDbPlan<'_>) -> Result<PathBuf> {
         cache_dir_for(&plan.device.hardware_model, &plan.firmware.product_code)?
             .join(LUMIA_520_SBL3),
     )
+}
+
+pub(crate) fn donor_ffu_url() -> String {
+    format!(
+        "{}/{}/{}",
+        LUMIADB_API_BASE, DONOR_MODEL, DONOR_FFU_FILENAME
+    )
+}
+
+pub(crate) fn cached_donor_ffu_path() -> Result<PathBuf> {
+    Ok(cache_dir_for(DONOR_MODEL, DONOR_PRODUCT_CODE)?.join(DONOR_FFU_FILENAME))
 }
 
 fn cache_root() -> Result<PathBuf> {
