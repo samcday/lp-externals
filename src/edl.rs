@@ -1,6 +1,9 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use rusb::{Device, DeviceHandle, Direction, GlobalContext, TransferType, UsbContext};
 
+use crate::util::hex_dump;
+
+const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const DEVICE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub(crate) const DEFAULT_VID: u16 = 0x05c6;
@@ -64,6 +67,175 @@ pub(crate) fn probe(vid: u16, pid: u16, wait: bool) -> Result<EdlDeviceInfo> {
         mode,
         endpoints,
     })
+}
+
+pub(crate) fn with_device<T>(
+    vid: u16,
+    pid: u16,
+    wait: bool,
+    f: impl FnOnce(&mut DeviceHandle<GlobalContext>, &EdlEndpoints) -> Result<T>,
+) -> Result<T> {
+    let (device, mut handle) = open_device(vid, pid, wait)?;
+    let endpoints = find_bulk_endpoints(&device)?;
+
+    if handle
+        .kernel_driver_active(endpoints.interface)
+        .unwrap_or(false)
+    {
+        handle
+            .detach_kernel_driver(endpoints.interface)
+            .with_context(|| {
+                format!(
+                    "failed to detach kernel driver from interface {}",
+                    endpoints.interface
+                )
+            })?;
+    }
+
+    handle
+        .claim_interface(endpoints.interface)
+        .with_context(|| format!("failed to claim interface {}", endpoints.interface))?;
+
+    let result = f(&mut handle, &endpoints);
+
+    handle
+        .release_interface(endpoints.interface)
+        .with_context(|| format!("failed to release interface {}", endpoints.interface))?;
+
+    result
+}
+
+pub(crate) fn dload_ping(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &EdlEndpoints,
+) -> Result<()> {
+    let response = send_dload_command(handle, endpoints, &[0x06])?;
+    ensure!(
+        response == [0x02],
+        "unexpected DLOAD ping response: {}",
+        hex_dump(&response)
+    );
+    Ok(())
+}
+
+fn send_dload_command(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &EdlEndpoints,
+    command: &[u8],
+) -> Result<Vec<u8>> {
+    let packet = encode_dload_frame(command);
+    write_bulk_all(handle, endpoints.out_addr, &packet)?;
+    read_dload_frame(handle, endpoints.in_addr)
+}
+
+fn write_bulk_all(
+    handle: &mut DeviceHandle<GlobalContext>,
+    out_addr: u8,
+    mut bytes: &[u8],
+) -> Result<()> {
+    while !bytes.is_empty() {
+        let written = handle
+            .write_bulk(out_addr, bytes, DEFAULT_TIMEOUT)
+            .with_context(|| format!("failed to write to bulk OUT endpoint 0x{out_addr:02x}"))?;
+        ensure!(written != 0, "short USB write: wrote 0 bytes");
+        bytes = &bytes[written..];
+    }
+
+    Ok(())
+}
+
+fn read_dload_frame(handle: &mut DeviceHandle<GlobalContext>, in_addr: u8) -> Result<Vec<u8>> {
+    let mut raw = Vec::new();
+
+    for _ in 0..8 {
+        let mut buffer = vec![0; 0x4000];
+        let read = handle
+            .read_bulk(in_addr, &mut buffer, DEFAULT_TIMEOUT)
+            .with_context(|| format!("failed to read from bulk IN endpoint 0x{in_addr:02x}"))?;
+        ensure!(read != 0, "read zero bytes from bulk IN endpoint");
+        raw.extend_from_slice(&buffer[..read]);
+
+        if let Some(frame) = try_decode_dload_frame(&raw)? {
+            return Ok(frame);
+        }
+    }
+
+    bail!("DLOAD response did not contain a complete frame");
+}
+
+fn encode_dload_frame(payload: &[u8]) -> Vec<u8> {
+    let checksum = crc16_x25(payload);
+    let mut frame = Vec::with_capacity(payload.len() + 4);
+    frame.push(0x7e);
+    push_escaped(&mut frame, payload);
+    push_escaped(&mut frame, &checksum.to_le_bytes());
+    frame.push(0x7e);
+    frame
+}
+
+fn push_escaped(frame: &mut Vec<u8>, bytes: &[u8]) {
+    for byte in bytes {
+        if matches!(*byte, 0x7d | 0x7e) {
+            frame.push(0x7d);
+            frame.push(*byte ^ 0x20);
+        } else {
+            frame.push(*byte);
+        }
+    }
+}
+
+fn try_decode_dload_frame(raw: &[u8]) -> Result<Option<Vec<u8>>> {
+    let Some(start) = raw.iter().position(|byte| *byte == 0x7e) else {
+        return Ok(None);
+    };
+    let Some(end) = raw[start + 1..]
+        .iter()
+        .position(|byte| *byte == 0x7e)
+        .map(|offset| start + 1 + offset)
+    else {
+        return Ok(None);
+    };
+
+    let mut decoded = Vec::with_capacity(end - start);
+    let mut index = start + 1;
+    while index < end {
+        let byte = raw[index];
+        if byte == 0x7d {
+            index += 1;
+            ensure!(index < end, "DLOAD response frame has dangling escape byte");
+            decoded.push(raw[index] ^ 0x20);
+        } else {
+            decoded.push(byte);
+        }
+        index += 1;
+    }
+
+    ensure!(decoded.len() >= 3, "DLOAD response frame is too short");
+    let payload_len = decoded.len() - 2;
+    let payload = &decoded[..payload_len];
+    let expected = crc16_x25(payload);
+    let actual = u16::from_le_bytes([decoded[payload_len], decoded[payload_len + 1]]);
+    ensure!(
+        actual == expected,
+        "DLOAD response CRC mismatch: expected {expected:04x}, got {actual:04x}"
+    );
+
+    Ok(Some(payload.to_vec()))
+}
+
+fn crc16_x25(bytes: &[u8]) -> u16 {
+    let mut crc = 0xffffu16;
+    for byte in bytes {
+        crc ^= *byte as u16;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0x8408;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
 }
 
 fn classify_mode(product: Option<&str>) -> EdlMode {

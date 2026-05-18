@@ -234,6 +234,26 @@ enum EdlCommand {
         #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
         pid: u16,
     },
+
+    /// Qualcomm emergency download protocol commands.
+    Dload {
+        #[command(subcommand)]
+        command: EdlDloadCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EdlDloadCommand {
+    /// Check whether DLOAD is alive.
+    Ping {
+        /// USB vendor ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_VID, value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
+        pid: u16,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -514,6 +534,9 @@ fn main() -> Result<()> {
         },
         Command::Edl { command } => match command {
             EdlCommand::Probe { vid, pid } => commands::edl::probe(vid, pid, cli.wait),
+            EdlCommand::Dload { command } => match command {
+                EdlDloadCommand::Ping { vid, pid } => commands::edl::dload_ping(vid, pid, cli.wait),
+            },
         },
     }
 }

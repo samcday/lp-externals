@@ -19,3 +19,12 @@ pub(crate) fn probe(vid: u16, pid: u16, wait: bool) -> Result<()> {
 
     Ok(())
 }
+
+pub(crate) fn dload_ping(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    edl::with_device(vid, pid, wait, |handle, endpoints| {
+        edl::dload_ping(handle, endpoints)
+    })?;
+    println!("DLOAD ping: ok");
+
+    Ok(())
+}
