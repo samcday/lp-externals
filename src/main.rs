@@ -330,6 +330,33 @@ enum EdlArmprgCommand {
         #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
         pid: u16,
     },
+
+    /// Write a file to raw flash through ARMPRG.
+    Write {
+        /// USB vendor ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_VID, value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
+        pid: u16,
+
+        /// Raw flash partition ID. Lumia eMMC uses 0x21.
+        #[arg(long, default_value = "0x21", value_parser = parse_u16)]
+        partition: u16,
+
+        /// Sector where the file write starts.
+        #[arg(long, value_parser = parse_u32)]
+        start_sector: u32,
+
+        /// File to write.
+        #[arg(long)]
+        file: PathBuf,
+
+        /// Required guard for destructive raw flash writes.
+        #[arg(long)]
+        confirm_raw_write: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -632,6 +659,22 @@ fn main() -> Result<()> {
                 EdlArmprgCommand::Close { vid, pid } => {
                     commands::edl::armprg_close(vid, pid, cli.wait)
                 }
+                EdlArmprgCommand::Write {
+                    vid,
+                    pid,
+                    partition,
+                    start_sector,
+                    file,
+                    confirm_raw_write,
+                } => commands::edl::armprg_write(
+                    vid,
+                    pid,
+                    cli.wait,
+                    partition,
+                    start_sector,
+                    &file,
+                    confirm_raw_write,
+                ),
             },
         },
     }

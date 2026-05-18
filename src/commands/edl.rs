@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{fs, path::Path};
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -169,4 +169,57 @@ pub(crate) fn armprg_close(vid: u16, pid: u16, wait: bool) -> Result<()> {
     println!("ARMPRG partition: closed");
 
     Ok(())
+}
+
+pub(crate) fn armprg_write(
+    vid: u16,
+    pid: u16,
+    wait: bool,
+    partition: u16,
+    start_sector: u32,
+    file: &Path,
+    confirm_raw_write: bool,
+) -> Result<()> {
+    ensure!(
+        confirm_raw_write,
+        "pass --confirm-raw-write to write raw flash"
+    );
+    ensure!(
+        partition <= u8::MAX as u16,
+        "ARMPRG partition ID must fit in one byte"
+    );
+    let start_byte = start_sector
+        .checked_mul(0x200)
+        .context("start sector byte offset overflow")?;
+    let bytes = fs::read(file).with_context(|| format!("failed to read {}", file.display()))?;
+    ensure!(!bytes.is_empty(), "{} is empty", file.display());
+    let byte_end = start_byte
+        .checked_add(u32::try_from(bytes.len()).context("file is too large for ARMPRG u32 offset")?)
+        .context("raw write byte range overflow")?;
+
+    println!("ARMPRG raw write:");
+    println!("  file: {}", file.display());
+    println!("  partition: 0x{partition:02x}");
+    println!("  start sector: {start_sector}");
+    println!("  byte range: 0x{start_byte:08x}..0x{byte_end:08x}");
+    println!("  bytes: {}", bytes.len());
+    println!("  sha256: {}", sha256_hex(&bytes));
+
+    edl::with_device(vid, pid, wait, |handle, endpoints| {
+        edl::armprg_hello(handle, endpoints)?;
+        edl::armprg_set_security_mode(handle, endpoints, 0)?;
+        edl::armprg_open_partition(handle, endpoints, partition as u8)?;
+        let flash_result = edl::armprg_flash(handle, endpoints, start_byte, &bytes);
+        let close_result = edl::armprg_close_partition(handle, endpoints);
+        flash_result.and(close_result)
+    })?;
+    println!("ARMPRG raw write: complete");
+
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    hex_dump_compact(&Sha256::digest(bytes))
 }

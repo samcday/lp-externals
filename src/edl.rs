@@ -258,6 +258,43 @@ pub(crate) fn armprg_close_partition(
     Ok(())
 }
 
+pub(crate) fn armprg_flash(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &EdlEndpoints,
+    start_byte: u32,
+    data: &[u8],
+) -> Result<()> {
+    ensure!(!data.is_empty(), "ARMPRG flash data is empty");
+
+    let mut position = start_byte;
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let current_len = (data.len() - offset).min(0x400);
+        let mut command = Vec::with_capacity(5 + current_len);
+        command.push(0x07);
+        command.extend_from_slice(&position.to_le_bytes());
+        command.extend_from_slice(&data[offset..offset + current_len]);
+
+        let response = send_armprg_command(handle, endpoints, &command)
+            .with_context(|| format!("failed to flash ARMPRG chunk at 0x{position:08x}"))?;
+        let mut expected = Vec::with_capacity(5);
+        expected.push(0x08);
+        expected.extend_from_slice(&position.to_le_bytes());
+        ensure!(
+            response.get(..5) == Some(expected.as_slice()),
+            "unexpected ARMPRG flash response at 0x{position:08x}: {}",
+            hex_dump(&response)
+        );
+
+        position = position
+            .checked_add(current_len as u32)
+            .context("ARMPRG flash position overflow")?;
+        offset += current_len;
+    }
+
+    Ok(())
+}
+
 fn send_armprg_command(
     handle: &mut DeviceHandle<GlobalContext>,
     endpoints: &EdlEndpoints,
