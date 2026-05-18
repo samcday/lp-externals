@@ -2,20 +2,18 @@
 
 ## Goal
 
-`jailbreak` is the all-in-one user-facing command for the Lumia Spec A unlock path. It should absorb the old `prepare-unlock` idea internally: detect the attached phone, resolve/cache the exact LumiaDB inputs, validate and patch all local artifacts, report the planned writes, and only then cross into destructive operations.
-
-The command should eventually eat the whole elephant. The first shipped milestone should be narrower: prove the complete local dry-run path, then transition the phone into Qualcomm emergency download mode. EDL loader upload and ARMPRG flashing can be implemented independently afterward.
+`prepare-jailbreak` is the non-destructive manifest/artifact generator for the Lumia Spec A unlock path. `jailbreak <manifest>` is the destructive/resumable executor for that prepared manifest.
 
 ## CLI Shape
 
 ```sh
-lp-externals jailbreak --dry-run
-lp-externals jailbreak --confirm-imei <IMEI>
+lp-externals prepare-jailbreak <manifest>
+lp-externals jailbreak <manifest>
 ```
 
-`--dry-run` must perform all read-only/device-query work and all local binary artifact generation, but must not write persistent phone state.
+`prepare-jailbreak` performs all read-only/device-query work and all local binary artifact generation, but must not write persistent phone state.
 
-`--confirm-imei` is required before any destructive operation. The confirmation must exactly match the IMEI read from PhoneInfoApp.
+`jailbreak <manifest>` treats the manifest as the explicit user confirmation and resumes from Lumia, DLOAD, or ARMPRG mode where possible.
 
 Do not expose model, product-code, FFU path, emergency-loader path, SBL3 path, or donor FFU flags in the first porcelain version. The happy path should be determined from the attached phone.
 
@@ -30,7 +28,7 @@ Do not expose model, product-code, FFU path, emergency-loader path, SBL3 path, o
 7. Match emergency loaders from the LumiaDB emergency package.
 8. Generate all offline jailbreak artifacts.
 9. Report the complete sector write plan.
-10. If not `--dry-run`, require IMEI confirmation and start the destructive stage.
+10. Write a machine-readable manifest with blob/artifact hashes and ARMPRG write quirks.
 
 ## Required Cached Inputs
 
@@ -75,7 +73,7 @@ Before any destructive operation, `jailbreak` must prove:
 
 ## Offline Artifact Generation
 
-The dry-run path must build the same artifacts the later destructive EDL phase will need:
+The prepare path must build the same artifacts the later destructive EDL phase will need:
 
 | Artifact | Source | Operation |
 | --- | --- | --- |
@@ -90,21 +88,19 @@ The dry-run path must build the same artifacts the later destructive EDL phase w
 | RPM | stock FFU `RPM` | copy |
 | WINSECAPP | stock FFU `WINSECAPP` | copy with ARMPRG bounds workaround |
 
-The dry-run output should include byte sizes, sector ranges, source partition names, and whether each blob is copied or patched.
+The manifest output includes byte sizes, sector ranges, source artifact hashes, and whether each blob is copied or patched.
 
-## First Destructive Milestone
+## Destructive Executor
 
-The first destructive `jailbreak` implementation should stop after entering Qualcomm emergency download mode. It should not upload a loader or flash raw sectors yet.
+`jailbreak <manifest>` detects the current mode and resumes accordingly:
 
-After all preflight gates pass and `--confirm-imei` matches:
-
-1. Switch to FlashApp.
-2. Send the complete signed FFU header through `NOKXFS` header v1.
-3. Send exactly one zero-filled FFU chunk through `NOKXFS` payload v1.
-4. Reset the phone.
-5. Report that the phone should now enumerate in Qualcomm emergency download mode.
+1. In Lumia mode, validate `TYPE`/`CTR`/`RRKH`, then soft-brick to DLOAD.
+2. In DLOAD mode, read RKH, compare with the manifest, upload the matching ARMPRG loader to `0x2A000000`, and start it.
+3. In ARMPRG mode, verify all manifest hashes, open partition `0x21`, flash the prepared boot-chain write plan, close the partition, and reboot.
 
 The soft-brick primitive should intentionally use secure FFU sync v1 for the zero chunk, matching WPinternals `PerformSoftBrick()`, even when FlashApp reports sync v2 support.
+
+The ARMPRG write plan must encode known loader quirks: GPT starts at sector `1` with length `0x41ff`, and `WINSECAPP` writes are capped at `0x1e7fe00`.
 
 ## Plumbing Split
 
@@ -126,19 +122,6 @@ lp-externals soft-brick --ffu <stock.ffu> --confirm-imei <IMEI>
 
 It must not perform LumiaDB lookup, emergency-loader validation, GPT patching, SBL patching, UEFI patching, or EDL protocol work.
 
-## Later EDL Stage
-
-Once a separate EDL worker exists, `jailbreak` can continue from Qualcomm emergency download mode:
-
-1. Detect DLOAD / ARMPRG USB transport.
-2. Optionally read RKH from DLOAD and compare with the already validated RRKH.
-3. Upload a matching signed ARMPRG loader to `0x2A000000`.
-4. Start the loader.
-5. Enter Qualcomm emergency flash mode.
-6. Open partition `0x21`.
-7. Flash the prepared boot-chain write plan.
-8. Reboot to Lumia BootMgr/FlashApp.
-
 ## Later EFIESP Stage
 
 Full WPinternals-equivalent jailbreak also needs the EFIESP/UEFI unlock stage:
@@ -156,7 +139,7 @@ The current stock RM-914 FFU is Windows Phone 8.1, while WPinternals `SecureBoot
 Fail closed. Do not guess when:
 
 - PhoneInfoApp cannot be reached.
-- IMEI cannot be read or confirmation does not match.
+- Phone identity cannot be read during prepare.
 - LumiaDB resolution is missing or ambiguous.
 - Any required blob is unavailable or invalid.
 - RRKH validation fails.

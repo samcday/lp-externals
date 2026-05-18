@@ -131,8 +131,8 @@ enum Command {
         confirm_imei: String,
     },
 
-    /// Prepare the Lumia Spec A jailbreak and stop before Qualcomm EDL protocol work.
-    Jailbreak {
+    /// Build a first-class jailbreak manifest and artifacts without writing phone state.
+    PrepareJailbreak {
         /// USB vendor ID.
         #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
         vid: u16,
@@ -141,13 +141,30 @@ enum Command {
         #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
         pid: u16,
 
-        /// Resolve/download/patch/report only; do not send the soft-brick sequence.
-        #[arg(long)]
-        dry_run: bool,
+        /// Output manifest path.
+        manifest: PathBuf,
+    },
 
-        /// Exact phone IMEI required before sending the destructive soft-brick stage.
-        #[arg(long)]
-        confirm_imei: Option<String>,
+    /// Execute or resume a prepared Lumia Spec A jailbreak manifest.
+    Jailbreak {
+        /// Lumia UEFI USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        lumia_vid: u16,
+
+        /// Lumia UEFI USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        lumia_pid: u16,
+
+        /// Qualcomm EDL USB vendor ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_VID, value_parser = parse_u16)]
+        edl_vid: u16,
+
+        /// Qualcomm EDL USB product ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
+        edl_pid: u16,
+
+        /// Prepared jailbreak manifest path.
+        manifest: PathBuf,
     },
 
     /// Restore the exact LumiaDB stock FFU after confirming the phone IMEI.
@@ -418,6 +435,23 @@ enum FfuCommand {
         /// Output path for raw partition bytes.
         output: PathBuf,
     },
+
+    /// Extract a raw sector range from an FFU.
+    ExtractSectors {
+        /// FFU path.
+        path: PathBuf,
+
+        /// First disk sector to extract.
+        #[arg(value_parser = parse_u32)]
+        start_sector: u32,
+
+        /// Number of sectors to extract.
+        #[arg(value_parser = parse_u32)]
+        sector_count: u32,
+
+        /// Output path for raw sector bytes.
+        output: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -572,12 +606,16 @@ fn main() -> Result<()> {
             ffu,
             confirm_imei,
         } => commands::soft_brick::run(vid, pid, cli.wait, &ffu, &confirm_imei),
+        Command::PrepareJailbreak { vid, pid, manifest } => {
+            commands::jailbreak::prepare(vid, pid, cli.wait, &manifest)
+        }
         Command::Jailbreak {
-            vid,
-            pid,
-            dry_run,
-            confirm_imei,
-        } => commands::jailbreak::run(vid, pid, cli.wait, dry_run, confirm_imei.as_deref()),
+            lumia_vid,
+            lumia_pid,
+            edl_vid,
+            edl_pid,
+            manifest,
+        } => commands::jailbreak::run(lumia_vid, lumia_pid, edl_vid, edl_pid, cli.wait, &manifest),
         Command::StockRestore {
             vid,
             pid,
@@ -639,6 +677,12 @@ fn main() -> Result<()> {
                 partition,
                 output,
             } => commands::ffu::extract(&path, &partition, &output),
+            FfuCommand::ExtractSectors {
+                path,
+                start_sector,
+                sector_count,
+                output,
+            } => commands::ffu::extract_sectors(&path, start_sector, sector_count, &output),
         },
         Command::Qcom { command } => match command {
             QcomCommand::ImageInfo { path, offset } => commands::qcom::image_info(&path, offset),

@@ -2,7 +2,7 @@
 
 Target: Lumia 520 / `fame`, a Spec A device in WPinternals terminology.
 
-This project is not ready to unlock yet. The current goal is to collect facts, download the correct blobs, validate them offline, and port the WPinternals Spec A flow safely before any destructive flashing exists in `lp-externals`.
+This project can now prepare and execute the destructive boot-chain flash stage, but it still does not implement the later EFIESP/BCD unlock stage required for a full WPinternals-equivalent jailbreak.
 
 ## Current Device Facts
 
@@ -229,7 +229,7 @@ High-level `LumiaV1UnlockFirmware()` sequence:
 19. Run the UEFI/EFIESP secure boot unlock stage.
 20. Continue boot to normal OS.
 
-Do not implement destructive steps until offline patch generation, RKH matching, loader matching, and dry-run reporting are implemented and reviewable.
+Do not run destructive steps until `prepare-jailbreak <manifest>` has generated reviewable artifacts and the manifest hash/write plan has been inspected.
 
 ## GPT Hack Details
 
@@ -393,10 +393,10 @@ Collect these before attempting any destructive step:
 
 ## Offline Validation Before Jailbreak
 
-`jailbreak --dry-run` now covers the pre-EDL validation and artifact generation path:
+`prepare-jailbreak <manifest>` covers the pre-EDL validation and artifact generation path:
 
 ```sh
-cargo run -- jailbreak --dry-run
+cargo run -- prepare-jailbreak rm914-jailbreak.json
 ```
 
 It performs these checks before any destructive operation:
@@ -414,22 +414,18 @@ It performs these checks before any destructive operation:
 11. Report all sector ranges that would be written.
 12. Refuse to continue if any ambiguity or mismatch exists.
 
-Generated patched artifacts are cached under:
+Generated patched artifacts are written beside the manifest under:
 
 ```text
-~/.cache/lp-externals/lumiadb/<TYPE>/<CTR>/jailbreak/
+<manifest-stem>.artifacts/
 ```
 
-The current `jailbreak --confirm-imei <IMEI>` implementation stops after the soft-brick transition and intentionally does not perform Qualcomm EDL protocol interactions.
+`jailbreak <manifest>` executes/resumes the destructive path from Lumia, DLOAD, or ARMPRG mode. The manifest is first-class and contains the blob hashes, artifact hashes, loader candidates, and ARMPRG-safe write plan.
 
 ## Destructive Unlock Work Not Yet Implemented
 
-Signed stock FFU restore exists as `stock-restore`, and the soft-brick primitive exists as `soft-brick`. These unlock-specific destructive paths are still not implemented:
+Signed stock FFU restore exists as `stock-restore`, the soft-brick primitive exists as `soft-brick`, and boot-chain ARMPRG flashing exists through `jailbreak <manifest>`. These unlock-specific destructive paths are still not implemented:
 
-- Qualcomm emergency loader upload
-- Qualcomm emergency raw flashing
-- GPT patch flashing
-- SBL2/SBL3/UEFI patch flashing
 - EFIESP/BCD patch writes
 
-The immediate safe path is: run `jailbreak --dry-run`, review the cached artifacts/write plan, then use the separate EDL work to consume that plan.
+The immediate safe path is: run `prepare-jailbreak <manifest>`, review the manifest and artifacts, then run `jailbreak <manifest>`.

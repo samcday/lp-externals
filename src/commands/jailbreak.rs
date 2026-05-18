@@ -1,18 +1,28 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
+    edl::{self, EdlMode},
     ffu::FfuMetadata,
     flash::{
         read_flash_app_info, read_flash_param, soft_brick_with_ffu, validate_ffu_against_flash_app,
     },
-    jailbreak::{build_jailbreak_artifacts, print_write_plan, render_write_plan},
+    jailbreak::{JailbreakArtifacts, build_jailbreak_artifacts, print_write_plan},
     lumiadb::{
-        cache_dir_for, cached_emergency_path, cached_ffu_path, cached_sbl3_path, download_file,
+        cached_emergency_path, cached_ffu_path, cached_sbl3_path, download_file,
         fetch_lumiadb_database, make_exact_lumiadb_plan, print_lumiadb_plan,
     },
-    qcom::{extract_root_key_hash, matching_armprg_loaders},
+    qcom::{
+        QcomCandidate, QualcommImage, contains_utf16le, extract_root_key_hash,
+        matching_armprg_loaders, read_qcom_candidates,
+    },
     uefi::{
         LumiaApp, ascii_param_value, identify_app, make_phone_info_read_request,
         parse_phone_info_response, require_app, send_raw_command,
@@ -22,35 +32,81 @@ use crate::{
     util::hex_dump_compact,
 };
 
-pub(crate) fn run(
-    vid: u16,
-    pid: u16,
-    wait: bool,
-    dry_run: bool,
-    confirm_imei: Option<&str>,
-) -> Result<()> {
-    if let Some(confirm_imei) = confirm_imei {
-        ensure!(!confirm_imei.is_empty(), "--confirm-imei must not be empty");
-        ensure!(confirm_imei.is_ascii(), "--confirm-imei must be ASCII");
-    } else if !dry_run {
-        bail!("jailbreak is destructive; pass --confirm-imei <IMEI> or use --dry-run");
-    }
+const MANIFEST_SCHEMA_VERSION: u32 = 1;
+const SECTOR_SIZE: u64 = 0x200;
+const EDL_LOADER_ADDRESS: u32 = 0x2a000000;
+const DETECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JailbreakManifest {
+    schema_version: u32,
+    product_type: String,
+    product_code: String,
+    masked_imei: String,
+    rrkh: String,
+    ffu: ManifestFile,
+    emergency: ManifestFile,
+    engineering_sbl3: ManifestFile,
+    artifact_dir: String,
+    loaders: Vec<ManifestLoader>,
+    writes: Vec<ManifestWrite>,
+    armprg: ArmprgQuirks,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ManifestFile {
+    path: String,
+    sha256: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ManifestLoader {
+    name: String,
+    format: String,
+    size: usize,
+    sha256: String,
+    root_key_hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ManifestWrite {
+    name: String,
+    start_sector: u64,
+    byte_len: u64,
+    source_offset: u64,
+    source: ManifestFile,
+    operation: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ArmprgQuirks {
+    partition: u8,
+    chunk_size: u32,
+    loader_address: u32,
+    gpt_write_len: u64,
+    winsecapp_limit: u64,
+}
+
+enum DetectedMode {
+    Lumia(LumiaApp),
+    Edl(EdlMode),
+}
+
+struct PhoneIdentity {
+    product_type: String,
+    product_code: String,
+    imei: String,
+}
+
+pub(crate) fn prepare(vid: u16, pid: u16, wait: bool, manifest_path: &Path) -> Result<()> {
+    let manifest_path = absolute_path(manifest_path)?;
+    ensure_parent(&manifest_path)?;
 
     switch_to_phone_info_app(vid, pid, wait).context("failed to switch to PhoneInfoApp")?;
     let phone = read_phone_identity(vid, pid)?;
     println!("phone type: {}", phone.product_type);
     println!("product code: {}", phone.product_code);
     println!("imei: {}", mask_imei(&phone.imei));
-
-    if let Some(confirm_imei) = confirm_imei {
-        if phone.imei != confirm_imei {
-            bail!(
-                "IMEI confirmation mismatch: phone IMEI is {}, confirmation was {}. Jailbreak was not started.",
-                mask_imei(&phone.imei),
-                mask_imei(confirm_imei)
-            );
-        }
-    }
 
     println!("fetching LumiaDB metadata");
     let database = fetch_lumiadb_database()?;
@@ -93,43 +149,25 @@ pub(crate) fn run(
     validate_ffu_against_flash_app(&ffu, &flash_info)?;
     validate_rrkh(&ffu_path, &ffu, &phone_rrkh)?;
 
-    let loaders = matching_armprg_loaders(&emergency_path, &phone_rrkh)
+    let loader_records = build_loader_records(&emergency_path, &phone_rrkh)
         .with_context(|| format!("failed to scan loaders in {}", emergency_path.display()))?;
     ensure!(
-        !loaders.is_empty(),
+        !loader_records.is_empty(),
         "no matching QHSUSB_ARMPRG loaders found for phone RRKH"
     );
-    println!("matching emergency loaders: {}", loaders.len());
-    for loader in &loaders {
+    println!("matching emergency loaders: {}", loader_records.len());
+    for loader in &loader_records {
         println!(
             "  {} format={} size={} rkh={}",
-            loader.name,
-            loader.format,
-            loader.size,
-            hex_dump_compact(&loader.root_key_hash)
+            loader.name, loader.format, loader.size, loader.root_key_hash
         );
     }
 
     let artifacts = build_jailbreak_artifacts(&ffu_path, &ffu, &sbl3_path)?;
-    let artifact_dir =
-        cache_dir_for(&plan.device.hardware_model, &plan.firmware.product_code)?.join("jailbreak");
+    let artifact_dir = manifest_path.with_extension("artifacts");
     fs::create_dir_all(&artifact_dir)
         .with_context(|| format!("failed to create {}", artifact_dir.display()))?;
-    fs::write(artifact_dir.join("gpt.bin"), &artifacts.patched_gpt)
-        .with_context(|| format!("failed to write {}/gpt.bin", artifact_dir.display()))?;
-    fs::write(artifact_dir.join("hack.bin"), &artifacts.hack_sector)
-        .with_context(|| format!("failed to write {}/hack.bin", artifact_dir.display()))?;
-    fs::write(artifact_dir.join("sbl2.bin"), &artifacts.patched_sbl2)
-        .with_context(|| format!("failed to write {}/sbl2.bin", artifact_dir.display()))?;
-    fs::write(artifact_dir.join("sbl3.bin"), &artifacts.patched_sbl3)
-        .with_context(|| format!("failed to write {}/sbl3.bin", artifact_dir.display()))?;
-    fs::write(artifact_dir.join("uefi.bin"), &artifacts.patched_uefi)
-        .with_context(|| format!("failed to write {}/uefi.bin", artifact_dir.display()))?;
-    fs::write(
-        artifact_dir.join("write-plan.txt"),
-        render_write_plan(&artifacts.write_plan),
-    )
-    .with_context(|| format!("failed to write {}/write-plan.txt", artifact_dir.display()))?;
+    let writes = write_artifacts(&artifact_dir, &ffu_path, &ffu, &artifacts)?;
 
     println!("patched artifacts:");
     println!("  directory: {}", artifact_dir.display());
@@ -140,10 +178,121 @@ pub(crate) fn run(
     println!("  UEFI: {} bytes", artifacts.patched_uefi.len());
     print_write_plan(&artifacts.write_plan);
 
-    if dry_run {
-        println!("dry run: jailbreak pre-EDL preflight passed; no phone state was written");
-        return Ok(());
+    let manifest = JailbreakManifest {
+        schema_version: MANIFEST_SCHEMA_VERSION,
+        product_type: phone.product_type,
+        product_code: phone.product_code,
+        masked_imei: mask_imei(&phone.imei),
+        rrkh: hex_dump_compact(&phone_rrkh),
+        ffu: file_record(&ffu_path)?,
+        emergency: file_record(&emergency_path)?,
+        engineering_sbl3: file_record(&sbl3_path)?,
+        artifact_dir: artifact_dir.display().to_string(),
+        loaders: loader_records,
+        writes,
+        armprg: ArmprgQuirks {
+            partition: 0x21,
+            chunk_size: 0x400,
+            loader_address: EDL_LOADER_ADDRESS,
+            gpt_write_len: 0x41ff,
+            winsecapp_limit: 0x1e7fe00,
+        },
+    };
+
+    write_manifest(&manifest_path, &manifest)?;
+    println!("wrote jailbreak manifest: {}", manifest_path.display());
+    println!(
+        "run `lp-externals jailbreak {}` to execute it",
+        manifest_path.display()
+    );
+
+    Ok(())
+}
+
+pub(crate) fn run(
+    lumia_vid: u16,
+    lumia_pid: u16,
+    edl_vid: u16,
+    edl_pid: u16,
+    wait: bool,
+    manifest_path: &Path,
+) -> Result<()> {
+    let manifest_path = absolute_path(manifest_path)?;
+    let manifest = read_manifest(&manifest_path)?;
+    validate_manifest(&manifest)?;
+
+    println!("manifest: {}", manifest_path.display());
+    println!("phone type: {}", manifest.product_type);
+    println!("product code: {}", manifest.product_code);
+    println!("imei: {}", manifest.masked_imei);
+    println!("rrkh: {}", manifest.rrkh);
+    print_manifest_write_plan(&manifest);
+
+    match detect_mode(lumia_vid, lumia_pid, edl_vid, edl_pid, wait)? {
+        DetectedMode::Lumia(app) => {
+            println!("detected Lumia mode: {}", app.name());
+            validate_lumia_against_manifest(lumia_vid, lumia_pid, &manifest)?;
+            soft_brick_from_manifest(lumia_vid, lumia_pid, &manifest)?;
+            wait_for_edl_mode(edl_vid, edl_pid, EdlMode::Download)?;
+            upload_loader_from_manifest(edl_vid, edl_pid, &manifest)?;
+            wait_for_edl_mode(edl_vid, edl_pid, EdlMode::Armprg)?;
+            flash_manifest(edl_vid, edl_pid, &manifest)?;
+        }
+        DetectedMode::Edl(EdlMode::Download) => {
+            println!("detected EDL mode: QHSUSB_DLOAD");
+            upload_loader_from_manifest(edl_vid, edl_pid, &manifest)?;
+            wait_for_edl_mode(edl_vid, edl_pid, EdlMode::Armprg)?;
+            flash_manifest(edl_vid, edl_pid, &manifest)?;
+        }
+        DetectedMode::Edl(EdlMode::Armprg) => {
+            println!("detected EDL mode: QHSUSB_ARMPRG");
+            flash_manifest(edl_vid, edl_pid, &manifest)?;
+        }
+        DetectedMode::Edl(mode) => bail!("unsupported EDL mode: {}", mode.name()),
     }
+
+    Ok(())
+}
+
+fn validate_lumia_against_manifest(vid: u16, pid: u16, manifest: &JailbreakManifest) -> Result<()> {
+    switch_to_phone_info_app(vid, pid, false).context("failed to switch to PhoneInfoApp")?;
+    let phone = read_phone_identity(vid, pid)?;
+    ensure!(
+        phone.product_type == manifest.product_type,
+        "manifest product type {} does not match phone {}",
+        manifest.product_type,
+        phone.product_type
+    );
+    ensure!(
+        phone.product_code == manifest.product_code,
+        "manifest product code {} does not match phone {}",
+        manifest.product_code,
+        phone.product_code
+    );
+    println!(
+        "validated Lumia identity: {} {}",
+        phone.product_type, phone.product_code
+    );
+
+    switch_to_flash_app(vid, pid, false).context("failed to switch to FlashApp")?;
+    let rrkh = with_device(vid, pid, false, |handle, endpoints| {
+        read_flash_param(handle, endpoints, "RRKH")
+    })?;
+    ensure!(
+        hex_dump_compact(&rrkh) == manifest.rrkh,
+        "manifest RRKH {} does not match phone RRKH {}",
+        manifest.rrkh,
+        hex_dump_compact(&rrkh)
+    );
+    println!("validated Lumia RRKH");
+
+    Ok(())
+}
+
+fn soft_brick_from_manifest(vid: u16, pid: u16, manifest: &JailbreakManifest) -> Result<()> {
+    let ffu_path = PathBuf::from(&manifest.ffu.path);
+    let ffu = FfuMetadata::open(&ffu_path)
+        .with_context(|| format!("failed to parse FFU {}", ffu_path.display()))?;
 
     println!("starting destructive jailbreak soft-brick stage");
     let reset_ack_read =
@@ -165,16 +314,347 @@ pub(crate) fn run(
     if reset_ack_read {
         println!("received NOKR response; device may not have reset yet");
     }
-    println!("jailbreak stopped before Qualcomm EDL protocol interactions");
-    println!("continue with a separate EDL/ARMPRG implementation session");
-
     Ok(())
 }
 
-struct PhoneIdentity {
-    product_type: String,
-    product_code: String,
-    imei: String,
+fn upload_loader_from_manifest(vid: u16, pid: u16, manifest: &JailbreakManifest) -> Result<()> {
+    let rrkh = edl::with_device(vid, pid, false, |handle, endpoints| {
+        edl::dload_read_rkh(handle, endpoints)
+    })?;
+    let rrkh_hex = hex_dump_compact(&rrkh);
+    ensure!(
+        rrkh_hex == manifest.rrkh,
+        "manifest RRKH {} does not match DLOAD RRKH {}",
+        manifest.rrkh,
+        rrkh_hex
+    );
+    println!("validated DLOAD RRKH: {rrkh_hex}");
+
+    let loaders = matching_loader_candidates(Path::new(&manifest.emergency.path), &rrkh)?;
+    ensure!(
+        !loaders.is_empty(),
+        "no matching QHSUSB_ARMPRG loaders found in {}",
+        manifest.emergency.path
+    );
+
+    let allowed_loader_hashes = manifest
+        .loaders
+        .iter()
+        .map(|loader| loader.sha256.as_str())
+        .collect::<Vec<_>>();
+    let mut last_error = None;
+    for (index, loader) in loaders.into_iter().enumerate() {
+        let hash = sha256_hex(&loader.bytes);
+        if !allowed_loader_hashes.contains(&hash.as_str()) {
+            continue;
+        }
+        println!(
+            "loader attempt {}: {} format={} size={} address=0x{:08x}",
+            index + 1,
+            loader.name,
+            loader.format,
+            loader.bytes.len(),
+            manifest.armprg.loader_address
+        );
+        let result =
+            edl::with_device_allow_release_disconnect(vid, pid, false, |handle, endpoints| {
+                edl::dload_send_to_memory(
+                    handle,
+                    endpoints,
+                    manifest.armprg.loader_address,
+                    &loader.bytes,
+                )?;
+                edl::dload_start_bootloader(handle, endpoints, manifest.armprg.loader_address)
+            });
+        match result {
+            Ok(()) => {
+                println!("loader started");
+                return Ok(());
+            }
+            Err(err) => {
+                if edl::probe(vid, pid, false).is_ok_and(|info| info.mode == EdlMode::Armprg) {
+                    println!("device reports QHSUSB_ARMPRG after loader start");
+                    return Ok(());
+                }
+                println!("loader attempt failed: {err:#}");
+                last_error = Some(err);
+            }
+        }
+    }
+
+    if let Some(err) = last_error {
+        Err(err).context("all matching loader attempts failed")
+    } else {
+        bail!("manifest matching loaders were not found in emergency package")
+    }
+}
+
+fn flash_manifest(vid: u16, pid: u16, manifest: &JailbreakManifest) -> Result<()> {
+    println!("starting ARMPRG boot-chain flash");
+    edl::with_device_allow_release_disconnect(vid, pid, false, |handle, endpoints| {
+        edl::armprg_hello(handle, endpoints)?;
+        edl::armprg_set_security_mode(handle, endpoints, 0)?;
+        edl::armprg_open_partition(handle, endpoints, manifest.armprg.partition)?;
+
+        let mut flash_error = None;
+        for write in &manifest.writes {
+            println!(
+                "flashing {:<9} start_sector={} bytes={} source={}",
+                write.name, write.start_sector, write.byte_len, write.source.path
+            );
+            let source = fs::read(&write.source.path)
+                .with_context(|| format!("failed to read {}", write.source.path))?;
+            ensure!(
+                sha256_hex(&source) == write.source.sha256,
+                "source hash mismatch for {}",
+                write.source.path
+            );
+            let source_start = usize::try_from(write.source_offset)
+                .context("source offset does not fit in usize")?;
+            let source_len =
+                usize::try_from(write.byte_len).context("write length does not fit in usize")?;
+            let source_end = source_start
+                .checked_add(source_len)
+                .context("source slice range overflow")?;
+            let data = source
+                .get(source_start..source_end)
+                .with_context(|| format!("source slice exceeds {}", write.source.path))?;
+            let start_byte = write
+                .start_sector
+                .checked_mul(SECTOR_SIZE)
+                .context("write byte offset overflow")?;
+            let start_byte = u32::try_from(start_byte)
+                .context("ARMPRG write byte offset does not fit in u32")?;
+
+            if let Err(err) = edl::armprg_flash(handle, endpoints, start_byte, data) {
+                flash_error = Some(err);
+                break;
+            }
+        }
+
+        let close_result = edl::armprg_close_partition(handle, endpoints);
+        if let Some(err) = flash_error {
+            return Err(err);
+        }
+        close_result?;
+        edl::armprg_reboot(handle, endpoints)
+    })?;
+    println!("ARMPRG boot-chain flash complete; reboot sent");
+    Ok(())
+}
+
+fn write_artifacts(
+    artifact_dir: &Path,
+    ffu_path: &Path,
+    ffu: &FfuMetadata,
+    artifacts: &JailbreakArtifacts,
+) -> Result<Vec<ManifestWrite>> {
+    let mut writes = Vec::new();
+    for entry in &artifacts.write_plan {
+        let bytes = artifact_bytes(entry.name, ffu_path, ffu, artifacts)?;
+        let file_name = format!("{}.bin", entry.name.to_ascii_lowercase());
+        let path = artifact_dir.join(file_name);
+        write_bytes(&path, &bytes)?;
+        writes.push(ManifestWrite {
+            name: entry.name.to_string(),
+            start_sector: entry.start_sector,
+            byte_len: entry.byte_len,
+            source_offset: 0,
+            source: file_record(&path)?,
+            operation: entry.operation.to_string(),
+        });
+    }
+    let text_plan = render_manifest_write_plan(&writes);
+    write_bytes(&artifact_dir.join("write-plan.txt"), text_plan.as_bytes())?;
+    Ok(writes)
+}
+
+fn artifact_bytes(
+    name: &str,
+    ffu_path: &Path,
+    ffu: &FfuMetadata,
+    artifacts: &JailbreakArtifacts,
+) -> Result<Vec<u8>> {
+    match name {
+        "MBR" => ffu.get_sectors(ffu_path, 0, 1),
+        "GPT" => Ok(artifacts.patched_gpt.clone()),
+        "HACK" => Ok(artifacts.hack_sector.clone()),
+        "SBL2" => Ok(artifacts.patched_sbl2.clone()),
+        "SBL3" => Ok(artifacts.patched_sbl3.clone()),
+        "UEFI" => Ok(artifacts.patched_uefi.clone()),
+        "SBL1" => ffu.get_partition(ffu_path, "SBL1"),
+        "TZ" => ffu.get_partition(ffu_path, "TZ"),
+        "RPM" => ffu.get_partition(ffu_path, "RPM"),
+        "WINSECAPP" => ffu.get_partition(ffu_path, "WINSECAPP"),
+        _ => bail!("unknown write-plan artifact {name}"),
+    }
+}
+
+fn build_loader_records(path: &Path, rrkh: &[u8]) -> Result<Vec<ManifestLoader>> {
+    let matches = matching_armprg_loaders(path, rrkh)?;
+    let candidates = read_qcom_candidates(path)?;
+    let mut records = Vec::new();
+
+    for loader in matches {
+        let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.name == loader.name)
+        else {
+            continue;
+        };
+        records.push(ManifestLoader {
+            name: loader.name,
+            format: loader.format.to_string(),
+            size: loader.size,
+            sha256: sha256_hex(&candidate.bytes),
+            root_key_hash: hex_dump_compact(&loader.root_key_hash),
+        });
+    }
+
+    Ok(records)
+}
+
+fn matching_loader_candidates(path: &Path, rrkh: &[u8]) -> Result<Vec<QcomCandidate>> {
+    ensure!(
+        rrkh.len() == 0x20,
+        "RKH must be 32 bytes, got {}",
+        rrkh.len()
+    );
+    let candidates = read_qcom_candidates(path)?;
+    let rkh_is_blank = rrkh.iter().all(|byte| *byte == 0);
+    let mut matches = Vec::new();
+
+    for candidate in candidates {
+        if candidate.bytes.len() > 0x80000 {
+            continue;
+        }
+        if !contains_utf16le(&candidate.bytes, "QHSUSB_ARMPRG") {
+            continue;
+        }
+        if !rkh_is_blank {
+            let image = match QualcommImage::parse(&candidate.bytes, 0) {
+                Ok(image) => image,
+                Err(_) => continue,
+            };
+            if image.root_key_hash.as_deref() != Some(rrkh) {
+                continue;
+            }
+        }
+        matches.push(candidate);
+    }
+
+    Ok(matches)
+}
+
+fn validate_manifest(manifest: &JailbreakManifest) -> Result<()> {
+    ensure!(
+        manifest.schema_version == MANIFEST_SCHEMA_VERSION,
+        "unsupported jailbreak manifest schema {}",
+        manifest.schema_version
+    );
+    ensure!(!manifest.writes.is_empty(), "manifest has no write entries");
+    validate_file_record(&manifest.ffu)?;
+    validate_file_record(&manifest.emergency)?;
+    validate_file_record(&manifest.engineering_sbl3)?;
+    for write in &manifest.writes {
+        validate_file_record(&write.source)?;
+        ensure!(write.byte_len != 0, "{} write length is zero", write.name);
+        ensure!(
+            write.start_sector.checked_mul(SECTOR_SIZE).is_some(),
+            "{} write byte offset overflows",
+            write.name
+        );
+        let source_len = fs::metadata(&write.source.path)
+            .with_context(|| format!("failed to stat {}", write.source.path))?
+            .len();
+        let source_end = write
+            .source_offset
+            .checked_add(write.byte_len)
+            .with_context(|| format!("{} source range overflows", write.name))?;
+        ensure!(
+            source_end <= source_len,
+            "{} write exceeds source file",
+            write.name
+        );
+        if write.name == "GPT" {
+            ensure!(
+                write.start_sector == 1 && write.byte_len == manifest.armprg.gpt_write_len,
+                "GPT write must use ARMPRG-safe sector 1 length {}",
+                manifest.armprg.gpt_write_len
+            );
+        }
+        if write.name == "WINSECAPP" {
+            let start = write
+                .start_sector
+                .checked_mul(SECTOR_SIZE)
+                .context("WINSECAPP byte offset overflow")?;
+            let end = start
+                .checked_add(write.byte_len)
+                .context("WINSECAPP byte end overflow")?;
+            ensure!(
+                end <= manifest.armprg.winsecapp_limit,
+                "WINSECAPP write exceeds ARMPRG limit"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_file_record(record: &ManifestFile) -> Result<()> {
+    let actual = sha256_file(Path::new(&record.path))?;
+    ensure!(
+        actual == record.sha256,
+        "hash mismatch for {}: manifest {}, actual {}",
+        record.path,
+        record.sha256,
+        actual
+    );
+    Ok(())
+}
+
+fn read_manifest(path: &Path) -> Result<JailbreakManifest> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn write_manifest(path: &Path, manifest: &JailbreakManifest) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(manifest).context("failed to serialize manifest")?;
+    write_bytes(path, &bytes)
+}
+
+fn detect_mode(
+    lumia_vid: u16,
+    lumia_pid: u16,
+    edl_vid: u16,
+    edl_pid: u16,
+    wait: bool,
+) -> Result<DetectedMode> {
+    loop {
+        if let Ok(info) = edl::probe(edl_vid, edl_pid, false) {
+            return Ok(DetectedMode::Edl(info.mode));
+        }
+        if let Ok(app) = with_device(lumia_vid, lumia_pid, false, |handle, endpoints| {
+            identify_app(handle, endpoints)
+        }) {
+            return Ok(DetectedMode::Lumia(app));
+        }
+        if !wait {
+            bail!("neither Lumia USB nor Qualcomm EDL USB device is present");
+        }
+        std::thread::sleep(DETECT_POLL_INTERVAL);
+    }
+}
+
+fn wait_for_edl_mode(vid: u16, pid: u16, expected: EdlMode) -> Result<()> {
+    println!("waiting for {}", expected.name());
+    loop {
+        if let Ok(info) = edl::probe(vid, pid, false) {
+            if info.mode == expected {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(DETECT_POLL_INTERVAL);
+    }
 }
 
 fn read_phone_identity(vid: u16, pid: u16) -> Result<PhoneIdentity> {
@@ -271,6 +751,11 @@ fn validate_rrkh(ffu_path: &Path, ffu: &FfuMetadata, phone_rrkh: &[u8]) -> Resul
     Ok(())
 }
 
+fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    ensure_parent(path)?;
+    fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))
+}
+
 fn ensure_parent(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -279,8 +764,55 @@ fn ensure_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn file_record(path: &Path) -> Result<ManifestFile> {
+    Ok(ManifestFile {
+        path: path.display().to_string(),
+        sha256: sha256_file(path)?,
+    })
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(sha256_hex(&bytes))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex_dump_compact(&Sha256::digest(bytes))
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()
+            .context("failed to read current directory")?
+            .join(path))
+    }
+}
+
 fn mask_imei(imei: &str) -> String {
     let suffix_len = imei.len().min(4);
     let prefix_len = imei.len().saturating_sub(suffix_len);
     format!("{}{}", "*".repeat(prefix_len), &imei[prefix_len..])
+}
+
+fn print_manifest_write_plan(manifest: &JailbreakManifest) {
+    println!("write plan:");
+    for write in &manifest.writes {
+        println!(
+            "  {:<9} start_sector={} bytes={} op={} source={}",
+            write.name, write.start_sector, write.byte_len, write.operation, write.source.path
+        );
+    }
+}
+
+fn render_manifest_write_plan(writes: &[ManifestWrite]) -> String {
+    let mut result = String::new();
+    for write in writes {
+        result.push_str(&format!(
+            "{} start_sector={} bytes={} op={} source={}\n",
+            write.name, write.start_sector, write.byte_len, write.operation, write.source.path
+        ));
+    }
+    result
 }

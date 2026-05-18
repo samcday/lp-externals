@@ -826,17 +826,6 @@ pub(crate) fn print_write_plan(entries: &[WritePlanEntry]) {
     }
 }
 
-pub(crate) fn render_write_plan(entries: &[WritePlanEntry]) -> String {
-    let mut result = String::new();
-    for entry in entries {
-        result.push_str(&format!(
-            "{} start_sector={} bytes={} op={} source={}\n",
-            entry.name, entry.start_sector, entry.byte_len, entry.operation, entry.source
-        ));
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use std::{env, path::PathBuf};
