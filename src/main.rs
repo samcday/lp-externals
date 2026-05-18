@@ -319,6 +319,17 @@ enum EdlArmprgCommand {
         #[arg(long, default_value = "0x21", value_parser = parse_u16)]
         partition: u16,
     },
+
+    /// Close the currently open ARMPRG raw flash partition.
+    Close {
+        /// USB vendor ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_VID, value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
+        pid: u16,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -618,6 +629,9 @@ fn main() -> Result<()> {
                     pid,
                     partition,
                 } => commands::edl::armprg_open(vid, pid, cli.wait, partition),
+                EdlArmprgCommand::Close { vid, pid } => {
+                    commands::edl::armprg_close(vid, pid, cli.wait)
+                }
             },
         },
     }

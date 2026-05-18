@@ -161,3 +161,12 @@ pub(crate) fn armprg_open(vid: u16, pid: u16, wait: bool, partition: u16) -> Res
 
     Ok(())
 }
+
+pub(crate) fn armprg_close(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    edl::with_device(vid, pid, wait, |handle, endpoints| {
+        edl::armprg_close_partition(handle, endpoints)
+    })?;
+    println!("ARMPRG partition: closed");
+
+    Ok(())
+}
