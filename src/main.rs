@@ -254,6 +254,17 @@ enum EdlDloadCommand {
         #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
         pid: u16,
     },
+
+    /// Read the Root Key Hash from DLOAD.
+    Rkh {
+        /// USB vendor ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_VID, value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
+        pid: u16,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -536,6 +547,7 @@ fn main() -> Result<()> {
             EdlCommand::Probe { vid, pid } => commands::edl::probe(vid, pid, cli.wait),
             EdlCommand::Dload { command } => match command {
                 EdlDloadCommand::Ping { vid, pid } => commands::edl::dload_ping(vid, pid, cli.wait),
+                EdlDloadCommand::Rkh { vid, pid } => commands::edl::dload_rkh(vid, pid, cli.wait),
             },
         },
     }

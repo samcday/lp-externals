@@ -118,6 +118,24 @@ pub(crate) fn dload_ping(
     Ok(())
 }
 
+pub(crate) fn dload_read_rkh(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &EdlEndpoints,
+) -> Result<Vec<u8>> {
+    let response = send_dload_command(handle, endpoints, &[0x18])?;
+    ensure!(
+        response.len() >= 0x23,
+        "DLOAD RKH response is too short: {} bytes",
+        response.len()
+    );
+    ensure!(
+        response.get(0..3) == Some(&[0x18, 0x01, 0x00]),
+        "unexpected DLOAD RKH response prefix: {}",
+        hex_dump(&response[..response.len().min(3)])
+    );
+    Ok(response[3..0x23].to_vec())
+}
+
 fn send_dload_command(
     handle: &mut DeviceHandle<GlobalContext>,
     endpoints: &EdlEndpoints,

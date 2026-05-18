@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::edl;
+use crate::{edl, util::hex_dump_compact};
 
 pub(crate) fn probe(vid: u16, pid: u16, wait: bool) -> Result<()> {
     let info = edl::probe(vid, pid, wait)?;
@@ -25,6 +25,15 @@ pub(crate) fn dload_ping(vid: u16, pid: u16, wait: bool) -> Result<()> {
         edl::dload_ping(handle, endpoints)
     })?;
     println!("DLOAD ping: ok");
+
+    Ok(())
+}
+
+pub(crate) fn dload_rkh(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    let rkh = edl::with_device(vid, pid, wait, |handle, endpoints| {
+        edl::dload_read_rkh(handle, endpoints)
+    })?;
+    println!("DLOAD RKH: {}", hex_dump_compact(&rkh));
 
     Ok(())
 }
