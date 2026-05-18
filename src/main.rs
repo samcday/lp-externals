@@ -265,6 +265,25 @@ enum EdlDloadCommand {
         #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
         pid: u16,
     },
+
+    /// Upload and start a matching signed ARMPRG loader from DLOAD.
+    Load {
+        /// USB vendor ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_VID, value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
+        pid: u16,
+
+        /// Emergency loader file, directory, or zip.
+        #[arg(long)]
+        loader: PathBuf,
+
+        /// Memory address where the ARMPRG loader will be uploaded and started.
+        #[arg(long, default_value = "0x2a000000", value_parser = parse_u32)]
+        address: u32,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -548,6 +567,12 @@ fn main() -> Result<()> {
             EdlCommand::Dload { command } => match command {
                 EdlDloadCommand::Ping { vid, pid } => commands::edl::dload_ping(vid, pid, cli.wait),
                 EdlDloadCommand::Rkh { vid, pid } => commands::edl::dload_rkh(vid, pid, cli.wait),
+                EdlDloadCommand::Load {
+                    vid,
+                    pid,
+                    loader,
+                    address,
+                } => commands::edl::dload_load(vid, pid, cli.wait, &loader, address),
             },
         },
     }

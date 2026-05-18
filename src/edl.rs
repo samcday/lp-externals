@@ -75,6 +75,25 @@ pub(crate) fn with_device<T>(
     wait: bool,
     f: impl FnOnce(&mut DeviceHandle<GlobalContext>, &EdlEndpoints) -> Result<T>,
 ) -> Result<T> {
+    with_device_release_policy(vid, pid, wait, false, f)
+}
+
+pub(crate) fn with_device_allow_release_disconnect<T>(
+    vid: u16,
+    pid: u16,
+    wait: bool,
+    f: impl FnOnce(&mut DeviceHandle<GlobalContext>, &EdlEndpoints) -> Result<T>,
+) -> Result<T> {
+    with_device_release_policy(vid, pid, wait, true, f)
+}
+
+fn with_device_release_policy<T>(
+    vid: u16,
+    pid: u16,
+    wait: bool,
+    allow_release_disconnect: bool,
+    f: impl FnOnce(&mut DeviceHandle<GlobalContext>, &EdlEndpoints) -> Result<T>,
+) -> Result<T> {
     let (device, mut handle) = open_device(vid, pid, wait)?;
     let endpoints = find_bulk_endpoints(&device)?;
 
@@ -98,9 +117,14 @@ pub(crate) fn with_device<T>(
 
     let result = f(&mut handle, &endpoints);
 
-    handle
-        .release_interface(endpoints.interface)
-        .with_context(|| format!("failed to release interface {}", endpoints.interface))?;
+    match handle.release_interface(endpoints.interface) {
+        Ok(()) => {}
+        Err(rusb::Error::NoDevice) if allow_release_disconnect => {}
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to release interface {}", endpoints.interface));
+        }
+    }
 
     result
 }
@@ -134,6 +158,60 @@ pub(crate) fn dload_read_rkh(
         hex_dump(&response[..response.len().min(3)])
     );
     Ok(response[3..0x23].to_vec())
+}
+
+pub(crate) fn dload_send_to_memory(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &EdlEndpoints,
+    address: u32,
+    data: &[u8],
+) -> Result<()> {
+    let mut current_address = address;
+    let mut offset = 0usize;
+
+    while offset < data.len() {
+        let current_len = (data.len() - offset).min(0x100);
+        let mut command = Vec::with_capacity(7 + current_len);
+        command.push(0x0f);
+        command.extend_from_slice(&current_address.to_be_bytes());
+        command.extend_from_slice(&(current_len as u16).to_be_bytes());
+        command.extend_from_slice(&data[offset..offset + current_len]);
+        expect_dload_ack(handle, endpoints, &command).with_context(|| {
+            format!("failed to upload DLOAD memory chunk at 0x{current_address:08x}")
+        })?;
+
+        current_address = current_address
+            .checked_add(current_len as u32)
+            .context("DLOAD upload address overflow")?;
+        offset += current_len;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn dload_start_bootloader(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &EdlEndpoints,
+    address: u32,
+) -> Result<()> {
+    let mut command = Vec::with_capacity(5);
+    command.push(0x05);
+    command.extend_from_slice(&address.to_be_bytes());
+    expect_dload_ack(handle, endpoints, &command)
+}
+
+fn expect_dload_ack(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &EdlEndpoints,
+    command: &[u8],
+) -> Result<()> {
+    let response = send_dload_command(handle, endpoints, command)?;
+    ensure!(
+        response == [0x02],
+        "unexpected DLOAD ACK response: {}",
+        hex_dump(&response)
+    );
+    Ok(())
 }
 
 fn send_dload_command(
