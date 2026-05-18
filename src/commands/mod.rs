@@ -1,4 +1,5 @@
 pub(crate) mod factory_reset;
+pub(crate) mod edl;
 pub(crate) mod ffu;
 pub(crate) mod gpt;
 pub(crate) mod identify;

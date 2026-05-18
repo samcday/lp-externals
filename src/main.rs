@@ -1,4 +1,5 @@
 mod commands;
+mod edl;
 mod ffu;
 mod flash;
 mod gpt;
@@ -15,6 +16,7 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     commands::gpt::DumpFormat as GptDumpFormat,
+    edl::{DEFAULT_PID as DEFAULT_EDL_PID, DEFAULT_VID as DEFAULT_EDL_VID},
     util::{parse_u16, parse_u32},
 };
 
@@ -211,6 +213,26 @@ enum Command {
     Qcom {
         #[command(subcommand)]
         command: QcomCommand,
+    },
+
+    /// Live Qualcomm emergency download / ARMPRG commands.
+    Edl {
+        #[command(subcommand)]
+        command: EdlCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EdlCommand {
+    /// Detect the live Qualcomm emergency USB interface and endpoints.
+    Probe {
+        /// USB vendor ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_VID, value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
+        pid: u16,
     },
 }
 
@@ -489,6 +511,9 @@ fn main() -> Result<()> {
             QcomCommand::ScanLoaders { path, rrkh } => {
                 commands::qcom::scan_loaders(&path, rrkh.as_deref())
             }
+        },
+        Command::Edl { command } => match command {
+            EdlCommand::Probe { vid, pid } => commands::edl::probe(vid, pid, cli.wait),
         },
     }
 }
