@@ -240,6 +240,12 @@ enum EdlCommand {
         #[command(subcommand)]
         command: EdlDloadCommand,
     },
+
+    /// ARMPRG emergency flash protocol commands.
+    Armprg {
+        #[command(subcommand)]
+        command: EdlArmprgCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -283,6 +289,20 @@ enum EdlDloadCommand {
         /// Memory address where the ARMPRG loader will be uploaded and started.
         #[arg(long, default_value = "0x2a000000", value_parser = parse_u32)]
         address: u32,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EdlArmprgCommand {
+    /// Check whether the loaded ARMPRG programmer is alive.
+    Hello {
+        /// USB vendor ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_VID, value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
+        pid: u16,
     },
 }
 
@@ -573,6 +593,11 @@ fn main() -> Result<()> {
                     loader,
                     address,
                 } => commands::edl::dload_load(vid, pid, cli.wait, &loader, address),
+            },
+            EdlCommand::Armprg { command } => match command {
+                EdlArmprgCommand::Hello { vid, pid } => {
+                    commands::edl::armprg_hello(vid, pid, cli.wait)
+                }
             },
         },
     }

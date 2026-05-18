@@ -137,3 +137,12 @@ fn matching_loader_candidates(path: &Path, rrkh: &[u8]) -> Result<Vec<QcomCandid
 
     Ok(matches)
 }
+
+pub(crate) fn armprg_hello(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    edl::with_device(vid, pid, wait, |handle, endpoints| {
+        edl::armprg_hello(handle, endpoints)
+    })?;
+    println!("ARMPRG hello: ok");
+
+    Ok(())
+}

@@ -200,6 +200,32 @@ pub(crate) fn dload_start_bootloader(
     expect_dload_ack(handle, endpoints, &command)
 }
 
+pub(crate) fn armprg_hello(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &EdlEndpoints,
+) -> Result<()> {
+    let mut command = Vec::with_capacity(36);
+    command.push(0x01);
+    command.extend_from_slice(b"QCOM fast download protocol host");
+    command.extend_from_slice(&[0x02, 0x02, 0x01]);
+    let response = send_armprg_command(handle, endpoints, &command)?;
+    ensure!(
+        response.first() == Some(&0x02),
+        "unexpected ARMPRG hello response: {}",
+        hex_dump(&response)
+    );
+    Ok(())
+}
+
+fn send_armprg_command(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &EdlEndpoints,
+    command: &[u8],
+) -> Result<Vec<u8>> {
+    write_bulk_all(handle, endpoints.out_addr, command)?;
+    read_dload_frame(handle, endpoints.in_addr)
+}
+
 fn expect_dload_ack(
     handle: &mut DeviceHandle<GlobalContext>,
     endpoints: &EdlEndpoints,
