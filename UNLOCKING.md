@@ -391,9 +391,15 @@ Collect these before attempting any destructive step:
 | Product code | `phone-info read CTR` | Exact firmware variant for LumiaDB lookup |
 | GPT layout | `gpt dump` | Confirms partition names and sector ranges |
 
-## Offline Validation Needed Before Unlock
+## Offline Validation Before Jailbreak
 
-Implement these before any destructive `unlock` command:
+`jailbreak --dry-run` now covers the pre-EDL validation and artifact generation path:
+
+```sh
+cargo run -- jailbreak --dry-run
+```
+
+It performs these checks before any destructive operation:
 
 1. Parse FFU headers and GPT.
 2. Extract partitions from FFU by name.
@@ -403,42 +409,27 @@ Implement these before any destructive `unlock` command:
 6. Unpack emergency package and find matching loader.
 7. Confirm loader contains `QHSUSB_ARMPRG` and matching RKH.
 8. Confirm engineering SBL3 fits target `SBL3` partition.
-9. Dry-run `SBL2`, `SBL3`, and `UEFI` patch pattern searches.
-10. Dry-run GPT `HACK` insertion and verify CRC rebuild.
+9. Patch `SBL2`, engineering `SBL3`, and `UEFI` locally.
+10. Insert GPT `HACK` locally and rebuild CRCs.
 11. Report all sector ranges that would be written.
 12. Refuse to continue if any ambiguity or mismatch exists.
 
-## `prepare-unlock` Scope
+Generated patched artifacts are cached under:
 
-The planned porcelain command is documented in `plans/lp-externals-prepare-unlock.md`.
-
-Intended shape:
-
-```sh
-lp-externals prepare-unlock <manifest>
+```text
+~/.cache/lp-externals/lumiadb/<TYPE>/<CTR>/jailbreak/
 ```
 
-It should:
-
-1. Switch to PhoneInfoApp if needed.
-2. Read `TYPE` and `CTR`.
-3. Resolve exactly one LumiaDB stock FFU entry.
-4. Cache blobs under XDG cache directories.
-5. Validate FFU/emergency/SBL3 basics.
-6. Write an authoritative manifest for a later `unlock <manifest>` command.
-
-It should not flash, patch, or enter Qualcomm emergency mode.
+The current `jailbreak --confirm-imei <IMEI>` implementation stops after the soft-brick transition and intentionally does not perform Qualcomm EDL protocol interactions.
 
 ## Destructive Unlock Work Not Yet Implemented
 
-Signed stock FFU restore now exists as `stock-restore`. Do not implement or run these unlock-specific destructive paths until all offline checks above exist:
+Signed stock FFU restore exists as `stock-restore`, and the soft-brick primitive exists as `soft-brick`. These unlock-specific destructive paths are still not implemented:
 
-- `NOKXFS` soft-brick or patched-payload writes outside the signed stock FFU restore path
-- FFU soft-brick trigger
 - Qualcomm emergency loader upload
 - Qualcomm emergency raw flashing
 - GPT patch flashing
 - SBL2/SBL3/UEFI patch flashing
 - EFIESP/BCD patch writes
 
-The immediate safe path is still: identify, download, parse, extract, validate, and generate reviewable dry-run artifacts.
+The immediate safe path is: run `jailbreak --dry-run`, review the cached artifacts/write plan, then use the separate EDL work to consume that plan.

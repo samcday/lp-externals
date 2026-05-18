@@ -2,6 +2,7 @@ mod commands;
 mod ffu;
 mod flash;
 mod gpt;
+mod jailbreak;
 mod lumiadb;
 mod qcom;
 mod uefi;
@@ -126,6 +127,25 @@ enum Command {
         /// Exact phone IMEI required before sending the destructive soft-brick sequence.
         #[arg(long)]
         confirm_imei: String,
+    },
+
+    /// Prepare the Lumia Spec A jailbreak and stop before Qualcomm EDL protocol work.
+    Jailbreak {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
+
+        /// Resolve/download/patch/report only; do not send the soft-brick sequence.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Exact phone IMEI required before sending the destructive soft-brick stage.
+        #[arg(long)]
+        confirm_imei: Option<String>,
     },
 
     /// Restore the exact LumiaDB stock FFU after confirming the phone IMEI.
@@ -396,6 +416,12 @@ fn main() -> Result<()> {
             ffu,
             confirm_imei,
         } => commands::soft_brick::run(vid, pid, cli.wait, &ffu, &confirm_imei),
+        Command::Jailbreak {
+            vid,
+            pid,
+            dry_run,
+            confirm_imei,
+        } => commands::jailbreak::run(vid, pid, cli.wait, dry_run, confirm_imei.as_deref()),
         Command::StockRestore {
             vid,
             pid,

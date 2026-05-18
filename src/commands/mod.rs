@@ -2,6 +2,7 @@ pub(crate) mod factory_reset;
 pub(crate) mod ffu;
 pub(crate) mod gpt;
 pub(crate) mod identify;
+pub(crate) mod jailbreak;
 pub(crate) mod lumiadb;
 pub(crate) mod param;
 pub(crate) mod phone_info;

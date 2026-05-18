@@ -344,6 +344,20 @@ pub(crate) fn cached_ffu_path(plan: &LumiaDbPlan<'_>) -> Result<PathBuf> {
     )
 }
 
+pub(crate) fn cached_emergency_path(plan: &LumiaDbPlan<'_>) -> Result<PathBuf> {
+    Ok(
+        cache_dir_for(&plan.device.hardware_model, &plan.firmware.product_code)?
+            .join(format!("{}.zip", plan.device.hardware_model)),
+    )
+}
+
+pub(crate) fn cached_sbl3_path(plan: &LumiaDbPlan<'_>) -> Result<PathBuf> {
+    Ok(
+        cache_dir_for(&plan.device.hardware_model, &plan.firmware.product_code)?
+            .join(LUMIA_520_SBL3),
+    )
+}
+
 fn cache_root() -> Result<PathBuf> {
     if let Some(path) = env::var_os("XDG_CACHE_HOME").filter(|value| !value.as_os_str().is_empty())
     {

@@ -21,6 +21,13 @@ pub(crate) struct QcomCandidate {
     pub(crate) bytes: Vec<u8>,
 }
 
+pub(crate) struct MatchingLoader {
+    pub(crate) name: String,
+    pub(crate) format: &'static str,
+    pub(crate) size: usize,
+    pub(crate) root_key_hash: Vec<u8>,
+}
+
 pub(crate) struct QualcommImage {
     pub(crate) header_type: &'static str,
     pub(crate) image_offset: u32,
@@ -292,6 +299,42 @@ pub(crate) fn extract_root_key_hash(bytes: &[u8]) -> Option<Vec<u8>> {
     }
 
     signatures.last().map(|root| Sha256::digest(root).to_vec())
+}
+
+pub(crate) fn matching_armprg_loaders(path: &Path, rrkh: &[u8]) -> Result<Vec<MatchingLoader>> {
+    ensure!(
+        rrkh.len() == 0x20,
+        "RRKH must be 32 bytes, got {}",
+        rrkh.len()
+    );
+    let candidates = read_qcom_candidates(path)?;
+    let mut matches = Vec::new();
+
+    for candidate in candidates {
+        if candidate.bytes.len() > 0x80000 {
+            continue;
+        }
+        if !contains_utf16le(&candidate.bytes, "QHSUSB_ARMPRG") {
+            continue;
+        }
+        let image = match QualcommImage::parse(&candidate.bytes, 0) {
+            Ok(image) => image,
+            Err(_) => continue,
+        };
+        let Some(root_key_hash) = image.root_key_hash else {
+            continue;
+        };
+        if root_key_hash == rrkh {
+            matches.push(MatchingLoader {
+                name: candidate.name,
+                format: candidate.format,
+                size: candidate.bytes.len(),
+                root_key_hash,
+            });
+        }
+    }
+
+    Ok(matches)
 }
 
 pub(crate) fn print_qcom_image(image: &QualcommImage) {

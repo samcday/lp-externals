@@ -1,6 +1,8 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
-use crate::util::{decode_utf16_name, find_bytes, format_guid, le_u32, le_u64};
+use crate::util::{
+    decode_utf16_name, find_bytes, format_guid, le_u32, le_u64, write_le_u32, write_le_u64,
+};
 
 pub(crate) struct ParsedGpt {
     partitions: Vec<GptPartition>,
@@ -135,6 +137,134 @@ pub(crate) struct GptPartition {
     pub(crate) last_lba: u64,
     pub(crate) attrs: u64,
     pub(crate) name: String,
+}
+
+impl GptPartition {
+    pub(crate) fn sector_count(&self) -> u64 {
+        self.last_lba
+            .saturating_sub(self.first_lba)
+            .saturating_add(1)
+    }
+}
+
+pub(crate) fn insert_spec_a_hack(gpt: &[u8]) -> Result<Vec<u8>> {
+    let layout = GptLayout::parse(gpt)?;
+    let mut patched = gpt.to_vec();
+
+    if find_partition_entry_offset(&layout, &patched, "HACK")?.is_some() {
+        bail!("GPT already contains a HACK partition; refusing to apply Spec A hack twice");
+    }
+
+    let sbl1_offset = find_partition_entry_offset(&layout, &patched, "SBL1")?
+        .context("GPT does not contain SBL1")?;
+    let sbl2_offset = find_partition_entry_offset(&layout, &patched, "SBL2")?
+        .context("GPT does not contain SBL2")?;
+    let hack_offset = find_empty_entry_offset(&layout, &patched)?
+        .context("GPT has no empty partition entry for HACK")?;
+
+    let sbl1_first = le_u64(&patched, sbl1_offset + 32)?;
+    let sbl1_last = le_u64(&patched, sbl1_offset + 40)?;
+    ensure!(
+        sbl1_last > sbl1_first,
+        "SBL1 is too small to donate a HACK sector"
+    );
+
+    let mut hack_entry = vec![0; layout.entry_size];
+    hack_entry[0..16].copy_from_slice(&patched[sbl2_offset..sbl2_offset + 16]);
+    hack_entry[16..32].copy_from_slice(&patched[sbl2_offset + 16..sbl2_offset + 32]);
+    write_le_u64(&mut hack_entry, 32, sbl1_last)?;
+    write_le_u64(&mut hack_entry, 40, sbl1_last)?;
+    hack_entry[48..56].copy_from_slice(&patched[sbl2_offset + 48..sbl2_offset + 56]);
+    write_utf16_name(&mut hack_entry[56..128], "HACK");
+
+    write_le_u64(&mut patched, sbl1_offset + 40, sbl1_last - 1)?;
+    patched[sbl2_offset..sbl2_offset + 32].fill(0x74);
+    patched[hack_offset..hack_offset + layout.entry_size].copy_from_slice(&hack_entry);
+
+    rebuild_primary_gpt_crc(&layout, &mut patched)?;
+    Ok(patched)
+}
+
+fn find_partition_entry_offset(
+    layout: &GptLayout,
+    gpt: &[u8],
+    name: &str,
+) -> Result<Option<usize>> {
+    for index in 0..layout.partition_entry_count {
+        let offset = partition_entry_offset(layout, index)?;
+        let Some(entry) = gpt.get(offset..offset + layout.entry_size) else {
+            break;
+        };
+        if entry[..16].iter().all(|byte| *byte == 0) {
+            continue;
+        }
+        let entry_name = decode_utf16_name(&entry[56..128]);
+        if entry_name.eq_ignore_ascii_case(name) {
+            return Ok(Some(offset));
+        }
+    }
+
+    Ok(None)
+}
+
+fn find_empty_entry_offset(layout: &GptLayout, gpt: &[u8]) -> Result<Option<usize>> {
+    for index in 0..layout.partition_entry_count {
+        let offset = partition_entry_offset(layout, index)?;
+        let Some(entry) = gpt.get(offset..offset + layout.entry_size) else {
+            break;
+        };
+        if entry[..16].iter().all(|byte| *byte == 0) {
+            return Ok(Some(offset));
+        }
+    }
+
+    Ok(None)
+}
+
+fn partition_entry_offset(layout: &GptLayout, index: u32) -> Result<usize> {
+    layout
+        .entries_offset
+        .checked_add(
+            usize::try_from(index)
+                .context("partition index does not fit in usize")?
+                .checked_mul(layout.entry_size)
+                .context("partition entry offset overflow")?,
+        )
+        .context("partition entry offset overflow")
+}
+
+fn write_utf16_name(target: &mut [u8], name: &str) {
+    target.fill(0);
+    for (index, word) in name.encode_utf16().take(target.len() / 2).enumerate() {
+        target[index * 2..index * 2 + 2].copy_from_slice(&word.to_le_bytes());
+    }
+}
+
+fn rebuild_primary_gpt_crc(layout: &GptLayout, gpt: &mut [u8]) -> Result<()> {
+    let table_size = usize::try_from(layout.partition_entry_count)
+        .context("partition entry count does not fit in usize")?
+        .checked_mul(layout.entry_size)
+        .context("partition table size overflow")?;
+    let table_end = layout
+        .entries_offset
+        .checked_add(table_size)
+        .context("partition table end overflow")?;
+    ensure!(table_end <= gpt.len(), "partition table exceeds GPT buffer");
+
+    let table_crc = crc32fast::hash(&gpt[layout.entries_offset..table_end]);
+    write_le_u32(gpt, layout.header_offset + 0x58, table_crc)?;
+    write_le_u32(gpt, layout.header_offset + 0x10, 0)?;
+
+    let header_size = usize::try_from(layout.header_size).context("GPT header size overflow")?;
+    let header_end = layout
+        .header_offset
+        .checked_add(header_size)
+        .context("GPT header end overflow")?;
+    ensure!(header_end <= gpt.len(), "GPT header exceeds buffer");
+    let header_crc = crc32fast::hash(&gpt[layout.header_offset..header_end]);
+    write_le_u32(gpt, layout.header_offset + 0x10, header_crc)?;
+
+    Ok(())
 }
 
 pub(crate) fn print_gpt(gpt: &[u8]) -> Result<()> {
