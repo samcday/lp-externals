@@ -128,6 +128,25 @@ pub(crate) fn flash_signed_ffu(
     }
 }
 
+pub(crate) fn soft_brick_with_ffu(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &Endpoints,
+    ffu_path: &Path,
+    ffu: &FfuMetadata,
+) -> Result<()> {
+    let header = ffu.read_header(ffu_path)?;
+    println!("sending FFU header ({} bytes)", header.len());
+    send_ffu_header_v1(handle, endpoints, &header, 0).context("failed to send FFU header")?;
+
+    let payload = vec![0; ffu.chunk_size];
+    println!(
+        "sending one zero FFU payload chunk with secure FFU sync v1 ({} bytes)",
+        payload.len()
+    );
+    send_ffu_payload_v1(handle, endpoints, &payload, 0, 0)
+        .context("failed to send zero FFU payload chunk")
+}
+
 pub(crate) fn validate_ffu_against_flash_app(ffu: &FfuMetadata, info: &FlashAppInfo) -> Result<()> {
     if let Some(platform_id) = &info.platform_id {
         ensure!(

@@ -244,6 +244,23 @@ cargo run -- stock-restore --confirm-imei 123456789012345
 
 The Lumia FlashApp path follows WPinternals' stock FFU behavior: send the complete signed FFU header with secure FFU header subblock `0x0b`, then stream payload data with sync v2 subblock `0x1b` when reported by FlashApp, or sync v1 subblock `0x0c` otherwise. This is distinct from the unlock/exploit path because FlashApp remains in its signed FFU validation flow.
 
+## Soft Brick
+
+The `soft-brick` plumbing command performs only the WPinternals-style signed-FFU soft-brick primitive:
+
+1. Switch to PhoneInfoApp and validate exact `--confirm-imei`.
+2. Parse the provided signed stock FFU and read its complete header.
+3. Switch to FlashApp.
+4. Send the FFU header with secure FFU header subblock `0x0b`.
+5. Send one zero-filled FFU chunk with sync v1 payload subblock `0x0c`.
+6. Reset with `NOKR`.
+
+```sh
+cargo run -- soft-brick --ffu /path/to/stock.ffu --confirm-imei 123456789012345
+```
+
+This command intentionally does not resolve LumiaDB inputs, validate emergency loaders, patch boot-chain binaries, or wait for Qualcomm emergency mode. It is destructive plumbing for reaching the recovery path used by the later jailbreak flow.
+
 ## Current Quirks
 
 - If `NOKD` is not sent shortly after the USB interface appears, the BootMgr watchdog can bite. The USB device may still appear present, but nothing responds on the bulk endpoints.

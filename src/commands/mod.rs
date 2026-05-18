@@ -9,6 +9,7 @@ pub(crate) mod qcom;
 pub(crate) mod raw;
 pub(crate) mod reset;
 pub(crate) mod shutdown;
+pub(crate) mod soft_brick;
 pub(crate) mod stay_awake;
 pub(crate) mod stock_restore;
 pub(crate) mod switch;

@@ -109,6 +109,25 @@ enum Command {
         confirm_imei: String,
     },
 
+    /// Trigger the FlashApp signed-FFU soft-brick primitive after confirming the phone IMEI.
+    SoftBrick {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
+
+        /// Stock signed FFU whose header will be accepted by FlashApp.
+        #[arg(long)]
+        ffu: PathBuf,
+
+        /// Exact phone IMEI required before sending the destructive soft-brick sequence.
+        #[arg(long)]
+        confirm_imei: String,
+    },
+
     /// Restore the exact LumiaDB stock FFU after confirming the phone IMEI.
     StockRestore {
         /// USB vendor ID.
@@ -371,6 +390,12 @@ fn main() -> Result<()> {
             pid,
             confirm_imei,
         } => commands::factory_reset::run(vid, pid, cli.wait, &confirm_imei),
+        Command::SoftBrick {
+            vid,
+            pid,
+            ffu,
+            confirm_imei,
+        } => commands::soft_brick::run(vid, pid, cli.wait, &ffu, &confirm_imei),
         Command::StockRestore {
             vid,
             pid,
