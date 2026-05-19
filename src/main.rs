@@ -548,6 +548,31 @@ enum FlashCommand {
         #[command(subcommand)]
         command: ParamCommand,
     },
+
+    /// Write a sector-aligned image to an exact GPT partition with FlashApp NOKF.
+    RawWritePartition {
+        /// USB vendor ID.
+        #[arg(long, default_value = "0x0421", value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value = "0x066e", value_parser = parse_u16)]
+        pid: u16,
+
+        /// GPT partition name to write, for example EFIESP.
+        partition: String,
+
+        /// Sector-aligned image whose size must exactly match the GPT partition.
+        image: PathBuf,
+
+        /// Required guard for destructive raw flash writes.
+        #[arg(long)]
+        confirm_raw_write: bool,
+
+        /// Validate the live device and image without writing flash.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -680,6 +705,22 @@ fn main() -> Result<()> {
                     commands::param::read(vid, pid, cli.wait, cli.debug, &name)
                 }
             },
+            FlashCommand::RawWritePartition {
+                vid,
+                pid,
+                partition,
+                image,
+                confirm_raw_write,
+                dry_run,
+            } => commands::flash_raw::raw_write_partition(
+                vid,
+                pid,
+                cli.wait,
+                &partition,
+                &image,
+                confirm_raw_write,
+                dry_run,
+            ),
         },
         Command::PhoneInfo { command } => match command {
             PhoneInfoCommand::Read { vid, pid, name } => {

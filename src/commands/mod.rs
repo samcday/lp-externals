@@ -2,6 +2,7 @@ pub(crate) mod disable_secure_boot;
 pub(crate) mod edl;
 pub(crate) mod factory_reset;
 pub(crate) mod ffu;
+pub(crate) mod flash_raw;
 pub(crate) mod gpt;
 pub(crate) mod identify;
 pub(crate) mod jailbreak;
