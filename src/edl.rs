@@ -200,6 +200,14 @@ pub(crate) fn dload_start_bootloader(
     expect_dload_ack(handle, endpoints, &command)
 }
 
+pub(crate) fn dload_reboot(
+    handle: &mut DeviceHandle<GlobalContext>,
+    endpoints: &EdlEndpoints,
+) -> Result<()> {
+    let packet = encode_dload_frame(&[0x0b]);
+    write_bulk_all(handle, endpoints.out_addr, &packet)
+}
+
 pub(crate) fn armprg_hello(
     handle: &mut DeviceHandle<GlobalContext>,
     endpoints: &EdlEndpoints,

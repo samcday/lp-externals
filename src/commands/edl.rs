@@ -106,6 +106,15 @@ pub(crate) fn dload_load(
     }
 }
 
+pub(crate) fn dload_reboot(vid: u16, pid: u16, wait: bool) -> Result<()> {
+    edl::with_device_allow_release_disconnect(vid, pid, wait, |handle, endpoints| {
+        edl::dload_reboot(handle, endpoints)
+    })?;
+    println!("DLOAD reboot: sent");
+
+    Ok(())
+}
+
 fn matching_loader_candidates(path: &Path, rrkh: &[u8]) -> Result<Vec<QcomCandidate>> {
     ensure!(
         rrkh.len() == 0x20,

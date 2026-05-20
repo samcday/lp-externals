@@ -331,6 +331,18 @@ enum EdlDloadCommand {
         #[arg(long, default_value = "0x2a000000", value_parser = parse_u32)]
         address: u32,
     },
+
+    /// Reboot from DLOAD mode.
+    #[command(alias = "reset")]
+    Reboot {
+        /// USB vendor ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_VID, value_parser = parse_u16)]
+        vid: u16,
+
+        /// USB product ID.
+        #[arg(long, default_value_t = DEFAULT_EDL_PID, value_parser = parse_u16)]
+        pid: u16,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -780,6 +792,9 @@ fn main() -> Result<()> {
                     loader,
                     address,
                 } => commands::edl::dload_load(vid, pid, cli.wait, &loader, address),
+                EdlDloadCommand::Reboot { vid, pid } => {
+                    commands::edl::dload_reboot(vid, pid, cli.wait)
+                }
             },
             EdlCommand::Armprg { command } => match command {
                 EdlArmprgCommand::Hello { vid, pid } => {
