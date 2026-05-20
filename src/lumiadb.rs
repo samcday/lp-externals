@@ -1,5 +1,5 @@
 use std::{
-    env,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -147,9 +147,18 @@ pub(crate) fn http_client() -> Result<reqwest::blocking::Client> {
 }
 
 pub(crate) async fn download_file(url: &str, path: &Path) -> Result<()> {
-    if path.exists() {
-        println!("exists: {}", path.display());
-        return Ok(());
+    if let Ok(metadata) = path.metadata() {
+        ensure!(
+            metadata.is_file(),
+            "download path exists but is not a file: {}",
+            path.display()
+        );
+        if metadata.len() != 0 {
+            println!("cached: {} ({} bytes)", path.display(), metadata.len());
+            return Ok(());
+        }
+        fs::remove_file(path)
+            .with_context(|| format!("failed to remove empty cache file {}", path.display()))?;
     }
 
     println!("downloading: {url}");
@@ -362,6 +371,19 @@ pub(crate) fn cached_sbl3_path(plan: &LumiaDbPlan<'_>) -> Result<PathBuf> {
     )
 }
 
+pub(crate) fn cached_jailbreak_artifact_dir(
+    product_type: &str,
+    product_code: &str,
+    imei: &str,
+) -> Result<PathBuf> {
+    Ok(cache_root()?
+        .join("jailbreak")
+        .join(cache_segment(product_type))
+        .join(cache_segment(product_code))
+        .join(cache_segment(imei))
+        .join("artifacts"))
+}
+
 pub(crate) fn donor_ffu_url() -> String {
     format!(
         "{}/{}/{}",
@@ -381,6 +403,25 @@ fn cache_root() -> Result<PathBuf> {
 
     let home = env::var_os("HOME").context("HOME is not set and XDG_CACHE_HOME is empty")?;
     Ok(PathBuf::from(home).join(".cache").join("lp-externals"))
+}
+
+fn cache_segment(value: &str) -> String {
+    let segment = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    if segment.is_empty() {
+        "_".to_string()
+    } else {
+        segment
+    }
 }
 
 pub(crate) fn print_lumiadb_plan(plan: &LumiaDbPlan<'_>) {

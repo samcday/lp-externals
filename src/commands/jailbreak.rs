@@ -16,8 +16,8 @@ use crate::{
     },
     jailbreak::{JailbreakArtifacts, build_jailbreak_artifacts, print_write_plan},
     lumiadb::{
-        cached_emergency_path, cached_ffu_path, cached_sbl3_path, download_file,
-        fetch_lumiadb_database, make_exact_lumiadb_plan, print_lumiadb_plan,
+        cached_emergency_path, cached_ffu_path, cached_jailbreak_artifact_dir, cached_sbl3_path,
+        download_file, fetch_lumiadb_database, make_exact_lumiadb_plan, print_lumiadb_plan,
     },
     qcom::{
         QcomCandidate, QualcommImage, contains_utf16le, extract_root_key_hash,
@@ -164,7 +164,8 @@ pub(crate) fn prepare(vid: u16, pid: u16, wait: bool, manifest_path: &Path) -> R
     }
 
     let artifacts = build_jailbreak_artifacts(&ffu_path, &ffu, &sbl3_path)?;
-    let artifact_dir = manifest_path.with_extension("artifacts");
+    let artifact_dir =
+        cached_jailbreak_artifact_dir(&phone.product_type, &phone.product_code, &phone.imei)?;
     fs::create_dir_all(&artifact_dir)
         .with_context(|| format!("failed to create {}", artifact_dir.display()))?;
     let writes = write_artifacts(&artifact_dir, &ffu_path, &ffu, &artifacts)?;
