@@ -16,3 +16,11 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="0421", ATTR{idProduct}=="0714", TAG+="uaccess
 SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="0a00", TAG+="uaccess"
 SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="0a01", TAG+="uaccess"
 SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="0a02", TAG+="uaccess"
+
+# Qualcomm emergency modes used by older Lumia devices.
+SUBSYSTEM=="usb", ATTR{idVendor}=="05c6", ATTR{idProduct}=="9006", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="05c6", ATTR{idProduct}=="9008", TAG+="uaccess"
+
+# 9006 exposes raw eMMC via usb-storage. Grant the active local user access but
+# keep desktop automounters away from the phone's firmware/filesystem volumes.
+SUBSYSTEM=="block", SUBSYSTEMS=="usb", ATTRS{idVendor}=="05c6", ATTRS{idProduct}=="9006", TAG+="uaccess", ENV{UDISKS_IGNORE}="1"
