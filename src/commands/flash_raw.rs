@@ -50,7 +50,7 @@ pub(crate) fn raw_write_partition(
 
         let flash_info = read_flash_app_info(handle, endpoints)?;
         let security_status = read_flash_param(handle, endpoints, "SS")?;
-        validate_unlocked_security_status(&security_status)?;
+        validate_raw_write_security_status(&security_status)?;
 
         let live_gpt = read_live_gpt(handle, endpoints)?;
         let partitions = ParsedGpt::parse(&live_gpt).context("failed to parse live GPT")?;
@@ -95,7 +95,7 @@ pub(crate) fn raw_write_partition(
     })
 }
 
-fn validate_unlocked_security_status(value: &[u8]) -> Result<()> {
+fn validate_raw_write_security_status(value: &[u8]) -> Result<()> {
     ensure!(
         value.len() >= 8,
         "FlashApp SS parameter is too short: {} bytes",
@@ -110,10 +110,7 @@ fn validate_unlocked_security_status(value: &[u8]) -> Result<()> {
     println!("secure FFU efuse: {secure_ffu}");
     println!("UEFI secure boot: {uefi_secure_boot}");
 
-    ensure!(
-        !platform_secure_boot && !secure_ffu && !uefi_secure_boot,
-        "raw partition writes require an unlocked phone; platform_secure_boot={platform_secure_boot} secure_ffu={secure_ffu} uefi_secure_boot={uefi_secure_boot}"
-    );
+    ensure!(!secure_ffu, "raw partition writes require secure_ffu=false");
     Ok(())
 }
 
