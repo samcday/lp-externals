@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, vec, vec::Vec};
+
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
@@ -5,12 +8,12 @@ use crate::util::{
     decode_utf16_name, find_bytes, format_guid, le_u32, le_u64, write_le_u32, write_le_u64,
 };
 
-pub(crate) struct ParsedGpt {
+pub struct ParsedGpt {
     partitions: Vec<GptPartition>,
 }
 
 impl ParsedGpt {
-    pub(crate) fn parse(gpt: &[u8]) -> Result<Self> {
+    pub fn parse(gpt: &[u8]) -> Result<Self> {
         let layout = GptLayout::parse(gpt)?;
         let mut partitions = Vec::new();
 
@@ -46,13 +49,19 @@ impl ParsedGpt {
         Ok(Self { partitions })
     }
 
-    pub(crate) fn partition(&self, name: &str) -> Option<&GptPartition> {
+    pub fn partition(&self, name: &str) -> Option<&GptPartition> {
         self.partitions
             .iter()
             .find(|partition| partition.name.eq_ignore_ascii_case(name))
     }
+
+    #[allow(dead_code)]
+    pub fn partitions(&self) -> &[GptPartition] {
+        &self.partitions
+    }
 }
 
+#[allow(dead_code)]
 struct GptLayout {
     header_offset: usize,
     header_size: u32,
@@ -69,7 +78,7 @@ struct GptLayout {
 }
 
 impl GptLayout {
-    pub(crate) fn parse(gpt: &[u8]) -> Result<Self> {
+    fn parse(gpt: &[u8]) -> Result<Self> {
         ensure!(
             gpt.len() >= 0x200,
             "GPT payload too short: {} bytes",
@@ -131,25 +140,25 @@ impl GptLayout {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct GptPartition {
-    pub(crate) index: u32,
-    pub(crate) type_guid: String,
-    pub(crate) unique_guid: String,
-    pub(crate) first_lba: u64,
-    pub(crate) last_lba: u64,
-    pub(crate) attrs: u64,
-    pub(crate) name: String,
+pub struct GptPartition {
+    pub index: u32,
+    pub type_guid: String,
+    pub unique_guid: String,
+    pub first_lba: u64,
+    pub last_lba: u64,
+    pub attrs: u64,
+    pub name: String,
 }
 
 impl GptPartition {
-    pub(crate) fn sector_count(&self) -> u64 {
+    pub fn sector_count(&self) -> u64 {
         self.last_lba
             .saturating_sub(self.first_lba)
             .saturating_add(1)
     }
 }
 
-pub(crate) fn insert_spec_a_hack(gpt: &[u8]) -> Result<Vec<u8>> {
+pub fn insert_spec_a_hack(gpt: &[u8]) -> Result<Vec<u8>> {
     let layout = GptLayout::parse(gpt)?;
     let mut patched = gpt.to_vec();
 
@@ -187,13 +196,13 @@ pub(crate) fn insert_spec_a_hack(gpt: &[u8]) -> Result<Vec<u8>> {
     Ok(patched)
 }
 
-pub(crate) struct SecureBootNvUpdate {
-    pub(crate) gpt: Vec<u8>,
-    pub(crate) gpt_changed: bool,
-    pub(crate) uefi_bs_nv: GptPartition,
+pub struct SecureBootNvUpdate {
+    pub gpt: Vec<u8>,
+    pub gpt_changed: bool,
+    pub uefi_bs_nv: GptPartition,
 }
 
-pub(crate) fn prepare_spec_a_secure_boot_nv(gpt: &[u8]) -> Result<SecureBootNvUpdate> {
+pub fn prepare_spec_a_secure_boot_nv(gpt: &[u8]) -> Result<SecureBootNvUpdate> {
     let layout = GptLayout::parse(gpt)?;
     let mut patched = gpt.to_vec();
 
@@ -343,14 +352,17 @@ fn random_guid_bytes(seed: &[u8], label: &[u8]) -> [u8; 16] {
     let mut hasher = Sha256::new();
     hasher.update(seed);
     hasher.update(label);
-    hasher.update(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-            .to_le_bytes(),
-    );
-    hasher.update(std::process::id().to_le_bytes());
+    #[cfg(feature = "std")]
+    {
+        hasher.update(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_le_bytes(),
+        );
+        hasher.update(std::process::id().to_le_bytes());
+    }
     let digest = hasher.finalize();
     let mut guid = [0; 16];
     guid.copy_from_slice(&digest[..16]);
@@ -386,7 +398,8 @@ fn rebuild_primary_gpt_crc(layout: &GptLayout, gpt: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn print_gpt(gpt: &[u8]) -> Result<()> {
+#[cfg(feature = "std")]
+pub fn print_gpt(gpt: &[u8]) -> Result<()> {
     let layout = GptLayout::parse(gpt)?;
     let parsed = ParsedGpt::parse(gpt)?;
 

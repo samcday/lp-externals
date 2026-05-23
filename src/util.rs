@@ -1,16 +1,19 @@
+#[cfg(not(feature = "std"))]
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
+
 use anyhow::{Context, Result, bail, ensure};
 
-pub(crate) fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
 }
 
-pub(crate) fn find_masked_pattern(
-    haystack: &[u8],
-    pattern: &[u8],
-    mask: Option<&[u8]>,
-) -> Option<usize> {
+pub fn find_masked_pattern(haystack: &[u8], pattern: &[u8], mask: Option<&[u8]>) -> Option<usize> {
     if pattern.is_empty() || haystack.len() < pattern.len() {
         return None;
     }
@@ -27,7 +30,7 @@ pub(crate) fn find_masked_pattern(
     })
 }
 
-pub(crate) fn find_unique_masked_pattern(
+pub fn find_unique_masked_pattern(
     haystack: &[u8],
     pattern: &[u8],
     mask: Option<&[u8]>,
@@ -42,35 +45,35 @@ pub(crate) fn find_unique_masked_pattern(
     Ok(first)
 }
 
-pub(crate) fn le_u32(bytes: &[u8], offset: usize) -> Result<u32> {
+pub fn le_u32(bytes: &[u8], offset: usize) -> Result<u32> {
     let bytes = bytes
         .get(offset..offset + 4)
         .with_context(|| format!("missing u32 at offset {offset}"))?;
     Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
 }
 
-pub(crate) fn le_u24(bytes: &[u8], offset: usize) -> Result<u32> {
+pub fn le_u24(bytes: &[u8], offset: usize) -> Result<u32> {
     let bytes = bytes
         .get(offset..offset + 3)
         .with_context(|| format!("missing u24 at offset {offset}"))?;
     Ok(bytes[0] as u32 | ((bytes[1] as u32) << 8) | ((bytes[2] as u32) << 16))
 }
 
-pub(crate) fn le_u16(bytes: &[u8], offset: usize) -> Result<u16> {
+pub fn le_u16(bytes: &[u8], offset: usize) -> Result<u16> {
     let bytes = bytes
         .get(offset..offset + 2)
         .with_context(|| format!("missing u16 at offset {offset}"))?;
     Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
 }
 
-pub(crate) fn le_u64(bytes: &[u8], offset: usize) -> Result<u64> {
+pub fn le_u64(bytes: &[u8], offset: usize) -> Result<u64> {
     let bytes = bytes
         .get(offset..offset + 8)
         .with_context(|| format!("missing u64 at offset {offset}"))?;
     Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
 }
 
-pub(crate) fn write_le_u16(bytes: &mut [u8], offset: usize, value: u16) -> Result<()> {
+pub fn write_le_u16(bytes: &mut [u8], offset: usize, value: u16) -> Result<()> {
     let target = bytes
         .get_mut(offset..offset + 2)
         .with_context(|| format!("missing u16 write target at offset {offset}"))?;
@@ -78,7 +81,7 @@ pub(crate) fn write_le_u16(bytes: &mut [u8], offset: usize, value: u16) -> Resul
     Ok(())
 }
 
-pub(crate) fn write_le_u24(bytes: &mut [u8], offset: usize, value: u32) -> Result<()> {
+pub fn write_le_u24(bytes: &mut [u8], offset: usize, value: u32) -> Result<()> {
     let target = bytes
         .get_mut(offset..offset + 3)
         .with_context(|| format!("missing u24 write target at offset {offset}"))?;
@@ -86,7 +89,7 @@ pub(crate) fn write_le_u24(bytes: &mut [u8], offset: usize, value: u32) -> Resul
     Ok(())
 }
 
-pub(crate) fn write_le_u32(bytes: &mut [u8], offset: usize, value: u32) -> Result<()> {
+pub fn write_le_u32(bytes: &mut [u8], offset: usize, value: u32) -> Result<()> {
     let target = bytes
         .get_mut(offset..offset + 4)
         .with_context(|| format!("missing u32 write target at offset {offset}"))?;
@@ -94,7 +97,7 @@ pub(crate) fn write_le_u32(bytes: &mut [u8], offset: usize, value: u32) -> Resul
     Ok(())
 }
 
-pub(crate) fn write_le_u64(bytes: &mut [u8], offset: usize, value: u64) -> Result<()> {
+pub fn write_le_u64(bytes: &mut [u8], offset: usize, value: u64) -> Result<()> {
     let target = bytes
         .get_mut(offset..offset + 8)
         .with_context(|| format!("missing u64 write target at offset {offset}"))?;
@@ -102,7 +105,7 @@ pub(crate) fn write_le_u64(bytes: &mut [u8], offset: usize, value: u64) -> Resul
     Ok(())
 }
 
-pub(crate) fn align(base: usize, offset: usize, alignment: usize) -> usize {
+pub fn align(base: usize, offset: usize, alignment: usize) -> usize {
     let relative = offset - base;
     if relative.is_multiple_of(alignment) {
         offset
@@ -111,19 +114,19 @@ pub(crate) fn align(base: usize, offset: usize, alignment: usize) -> usize {
     }
 }
 
-pub(crate) fn checksum8(bytes: &[u8]) -> u8 {
+pub fn checksum8(bytes: &[u8]) -> u8 {
     let checksum = bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
     0u8.wrapping_sub(checksum)
 }
 
-pub(crate) fn checksum16_le(bytes: &[u8]) -> u16 {
+pub fn checksum16_le(bytes: &[u8]) -> u16 {
     let checksum = bytes.chunks_exact(2).fold(0u16, |sum, chunk| {
         sum.wrapping_add(u16::from_le_bytes([chunk[0], chunk[1]]))
     });
     0u16.wrapping_sub(checksum)
 }
 
-pub(crate) fn format_guid(bytes: &[u8]) -> String {
+pub fn format_guid(bytes: &[u8]) -> String {
     format!(
         "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
@@ -140,7 +143,7 @@ pub(crate) fn format_guid(bytes: &[u8]) -> String {
     )
 }
 
-pub(crate) fn decode_utf16_name(bytes: &[u8]) -> String {
+pub fn decode_utf16_name(bytes: &[u8]) -> String {
     let words = bytes
         .chunks_exact(2)
         .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
@@ -150,7 +153,7 @@ pub(crate) fn decode_utf16_name(bytes: &[u8]) -> String {
     String::from_utf16_lossy(&words)
 }
 
-pub(crate) fn parse_u16(value: &str) -> Result<u16, String> {
+pub fn parse_u16(value: &str) -> Result<u16, String> {
     if let Some(hex) = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
@@ -161,7 +164,7 @@ pub(crate) fn parse_u16(value: &str) -> Result<u16, String> {
     }
 }
 
-pub(crate) fn parse_u32(value: &str) -> Result<u32, String> {
+pub fn parse_u32(value: &str) -> Result<u32, String> {
     if let Some(hex) = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
@@ -172,7 +175,7 @@ pub(crate) fn parse_u32(value: &str) -> Result<u32, String> {
     }
 }
 
-pub(crate) fn hex_dump(bytes: &[u8]) -> String {
+pub fn hex_dump(bytes: &[u8]) -> String {
     bytes
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -180,14 +183,14 @@ pub(crate) fn hex_dump(bytes: &[u8]) -> String {
         .join(" ")
 }
 
-pub(crate) fn hex_dump_compact(bytes: &[u8]) -> String {
+pub fn hex_dump_compact(bytes: &[u8]) -> String {
     bytes
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
 }
 
-pub(crate) fn parse_hex_bytes(value: &str) -> Result<Vec<u8>> {
+pub fn parse_hex_bytes(value: &str) -> Result<Vec<u8>> {
     let value = value.trim();
     ensure!(value.len().is_multiple_of(2), "hex string has odd length");
 
@@ -200,7 +203,7 @@ pub(crate) fn parse_hex_bytes(value: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
-pub(crate) fn ascii_dump(bytes: &[u8]) -> String {
+pub fn ascii_dump(bytes: &[u8]) -> String {
     bytes
         .iter()
         .map(|byte| {
@@ -213,6 +216,6 @@ pub(crate) fn ascii_dump(bytes: &[u8]) -> String {
         .collect()
 }
 
-pub(crate) fn ascii_lossy(bytes: &[u8]) -> String {
+pub fn ascii_lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }

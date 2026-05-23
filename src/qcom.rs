@@ -1,3 +1,7 @@
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, vec::Vec};
+
+#[cfg(feature = "cli")]
 use std::{
     fs,
     io::{Cursor, Read},
@@ -6,44 +10,47 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
+#[cfg(feature = "cli")]
 use zip::ZipArchive;
 
-use crate::util::{find_bytes, hex_dump_compact, le_u16, le_u32, le_u64, parse_hex_bytes};
+#[cfg(feature = "std")]
+use crate::util::hex_dump_compact;
+use crate::util::{find_bytes, le_u16, le_u32, le_u64, parse_hex_bytes};
 
-pub(crate) struct QcomSource {
-    pub(crate) format: &'static str,
-    pub(crate) bytes: Vec<u8>,
+pub struct QcomSource {
+    pub format: &'static str,
+    pub bytes: Vec<u8>,
 }
 
-pub(crate) struct QcomCandidate {
-    pub(crate) name: String,
-    pub(crate) format: &'static str,
-    pub(crate) bytes: Vec<u8>,
+pub struct QcomCandidate {
+    pub name: String,
+    pub format: &'static str,
+    pub bytes: Vec<u8>,
 }
 
-pub(crate) struct MatchingLoader {
-    pub(crate) name: String,
-    pub(crate) format: &'static str,
-    pub(crate) size: usize,
-    pub(crate) root_key_hash: Vec<u8>,
+pub struct MatchingLoader {
+    pub name: String,
+    pub format: &'static str,
+    pub size: usize,
+    pub root_key_hash: Vec<u8>,
 }
 
-pub(crate) struct QualcommImage {
-    pub(crate) header_type: &'static str,
-    pub(crate) image_offset: u32,
-    pub(crate) header_offset: u32,
-    pub(crate) image_address: u32,
-    pub(crate) image_size: u32,
-    pub(crate) code_size: u32,
-    pub(crate) signature_address: u32,
-    pub(crate) signature_size: u32,
-    pub(crate) certificates_address: u32,
-    pub(crate) certificates_size: u32,
-    pub(crate) root_key_hash: Option<Vec<u8>>,
+pub struct QualcommImage {
+    pub header_type: &'static str,
+    pub image_offset: u32,
+    pub header_offset: u32,
+    pub image_address: u32,
+    pub image_size: u32,
+    pub code_size: u32,
+    pub signature_address: u32,
+    pub signature_size: u32,
+    pub certificates_address: u32,
+    pub certificates_size: u32,
+    pub root_key_hash: Option<Vec<u8>>,
 }
 
 impl QualcommImage {
-    pub(crate) fn parse(bytes: &[u8], offset: u32) -> Result<Self> {
+    pub fn parse(bytes: &[u8], offset: u32) -> Result<Self> {
         let mut image_offset = offset;
         let header_offset;
         let header_type;
@@ -155,7 +162,8 @@ const LONG_QCOM_HEADER_MASK: &[u8] = &[
     0x00, 0x00, 0x00, 0x00,
 ];
 
-pub(crate) fn read_qcom_source(path: &Path) -> Result<QcomSource> {
+#[cfg(feature = "cli")]
+pub fn read_qcom_source(path: &Path) -> Result<QcomSource> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     if path
         .extension()
@@ -175,7 +183,8 @@ pub(crate) fn read_qcom_source(path: &Path) -> Result<QcomSource> {
     })
 }
 
-pub(crate) fn read_qcom_candidates(path: &Path) -> Result<Vec<QcomCandidate>> {
+#[cfg(feature = "cli")]
+pub fn read_qcom_candidates(path: &Path) -> Result<Vec<QcomCandidate>> {
     if path.is_dir() {
         let mut candidates = Vec::new();
         for entry in
@@ -242,8 +251,8 @@ pub(crate) fn read_qcom_candidates(path: &Path) -> Result<Vec<QcomCandidate>> {
     }])
 }
 
-pub(crate) fn parse_intel_hex(bytes: &[u8]) -> Result<Vec<u8>> {
-    let text = std::str::from_utf8(bytes).context("Intel HEX is not valid UTF-8")?;
+pub fn parse_intel_hex(bytes: &[u8]) -> Result<Vec<u8>> {
+    let text = core::str::from_utf8(bytes).context("Intel HEX is not valid UTF-8")?;
     let mut result = Vec::new();
 
     for (line_number, line) in text.lines().enumerate() {
@@ -277,7 +286,7 @@ pub(crate) fn parse_intel_hex(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(result)
 }
 
-pub(crate) fn extract_root_key_hash(bytes: &[u8]) -> Option<Vec<u8>> {
+pub fn extract_root_key_hash(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut signatures = Vec::new();
     let mut last_offset = 0usize;
 
@@ -301,7 +310,8 @@ pub(crate) fn extract_root_key_hash(bytes: &[u8]) -> Option<Vec<u8>> {
     signatures.last().map(|root| Sha256::digest(root).to_vec())
 }
 
-pub(crate) fn matching_armprg_loaders(path: &Path, rrkh: &[u8]) -> Result<Vec<MatchingLoader>> {
+#[cfg(feature = "cli")]
+pub fn matching_armprg_loaders(path: &Path, rrkh: &[u8]) -> Result<Vec<MatchingLoader>> {
     ensure!(
         rrkh.len() == 0x20,
         "RRKH must be 32 bytes, got {}",
@@ -337,7 +347,8 @@ pub(crate) fn matching_armprg_loaders(path: &Path, rrkh: &[u8]) -> Result<Vec<Ma
     Ok(matches)
 }
 
-pub(crate) fn print_qcom_image(image: &QualcommImage) {
+#[cfg(feature = "std")]
+pub fn print_qcom_image(image: &QualcommImage) {
     println!("header type: {}", image.header_type);
     println!("image offset: 0x{:08x}", image.image_offset);
     println!("header offset: 0x{:08x}", image.header_offset);
@@ -355,7 +366,7 @@ pub(crate) fn print_qcom_image(image: &QualcommImage) {
     }
 }
 
-pub(crate) fn contains_utf16le(bytes: &[u8], needle: &str) -> bool {
+pub fn contains_utf16le(bytes: &[u8], needle: &str) -> bool {
     let encoded = needle
         .encode_utf16()
         .flat_map(|word| word.to_le_bytes())
